@@ -1,0 +1,49 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+.venv-*/
+venv/
+env/
+
+# Test and tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Runtime artifacts
+logs/
+outputs/
+*.log
+*.tmp
+*.swp
+*.swo
+*.bak
+
+# Local data / vendor downloads
+archive/
+third_party/
+models/
+models/gguf/
+models/hf/
+models/finetuned/
+
+# Internal context docs that should stay local and out of packaging workflows
+AGENTS.md
+docs/context/PROJECT_STATE.md
+docs/context/CURRENT_WORK.md
+
+reports/
+scripts/
+tests/
+datasets/
+docs/
+# Challenge/private raw datasets
+datasets/exact/
+datasets/exact/official/
