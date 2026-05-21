@@ -77,21 +77,6 @@ $env:URA_HF_MODEL='gpt2'
 Pipeline configuration
 - Sửa `configs/pipeline.yaml` hoặc `app/pipeline_config.py` để bật/tắt các tính năng như `enable_llm_fallback`, `enable_llm_explanation`, `enable_hybrid_solver`.
 
-Test nhanh (local)
-- Smoke predict (đã tạo):
-
-```powershell
-$env:PYTHONPATH = "D:\URA_challenge"
-python tests/smoke_predict.py
-```
-
-- Chạy bộ test cụ thể:
-
-```powershell
-$env:PYTHONPATH = "D:\URA_challenge"
-python -m pytest tests/test_logic_solver.py tests/test_phase_6_fallback.py tests/test_explanation_worker.py -q
-```
-
 Ghi chú
 - Các module experimental (RAG, search-assisted, hybrid/Z3, LLM extractors) được lưu rời hoặc tắt theo cấu hình; core solver giữ hành vi xác định.
 - Thư mục `archive/experimental_removed` lưu bản sao tạm của các module đã được di chuyển.
