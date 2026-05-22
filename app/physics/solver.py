@@ -37,10 +37,15 @@ def _unsupported_context(question: str) -> str | None:
 
 def _compute(parsed: ParsedPhysicsProblem, fallback_used: bool = False, model_calls: int = 0) -> PhysicsSolution:
     if not parsed.formula_id:
+        reason = "no deterministic physics formula matched the supplied information."
+        if getattr(parsed, "ambiguity", None):
+            context = str(parsed.ambiguity[0]).replace("_", " ").strip()
+            if context:
+                reason = f"{context} means no deterministic physics formula matched the supplied information."
         return PhysicsSolution(
             success=False,
             answer="unknown",
-            explanation="The answer is unknown because no deterministic physics formula matched the supplied information.",
+            explanation=f"The answer is unknown because {reason}",
             formula_id=None,
             confidence=0.2,
             parsed=parsed,
