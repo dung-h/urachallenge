@@ -121,7 +121,7 @@ def _target(text: str) -> str | None:
         return "current"
     if re.search(r"\bwhat is i\b", low):
         return "current"
-    if "impedance" in low and "resonance" in low:
+    if "impedance" in low and resonance_context:
         return "resistance"
     if "resistance" in low and any(token in low for token in ["what is the resistance", "what resistance", "has what resistance", "find the resistance"]):
         return "resistance"
@@ -205,7 +205,19 @@ def parse_physics_question(question: str) -> ParsedPhysicsProblem:
             formula_id = "rlc_inductance_from_resonant_frequency"
     elif target == "resistance" and resonance_context and resistances and "impedance" in low:
         variables.update(R=resistances[0])
-        formula_id = "rlc_resonance_resistance"
+        formula_id = "rlc_resonance_impedance"
+
+    transformer_context = "transformer" in low and target == "voltage"
+    if transformer_context and voltages:
+        primary_turns = re.search(r"\b(?:n1|n_primary|primary\s+coil\s+has)\s*=?\s*(\d+(?:\.\d+)?)\s*turns?", low)
+        secondary_turns = re.search(r"\b(?:n2|n_secondary|secondary\s+coil\s+has)\s*=?\s*(\d+(?:\.\d+)?)\s*turns?", low)
+        if primary_turns and secondary_turns:
+            variables.update(
+                V_primary=voltages[0],
+                N_primary=float(primary_turns.group(1)),
+                N_secondary=float(secondary_turns.group(1)),
+            )
+            formula_id = "transformer_secondary_voltage"
 
     # Resultant force detection
     if target == "force" and len(forces) == 2:

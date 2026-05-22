@@ -119,16 +119,17 @@ def build_explanation_trace(
     formula_expression = None
     formula_target_unit = None
     if task_type == "physics" and fol:
-        try:
-            formula = get_formula(fol)
-        except KeyError:
-            formula = None
-            special_hint = SPECIAL_FORMULA_HINTS.get(fol)
-            if special_hint:
-                formula_expression, formula_target_unit = special_hint
-        if formula is not None:
-            formula_expression = formula.expression
-            formula_target_unit = formula.target_unit
+        special_hint = SPECIAL_FORMULA_HINTS.get(fol)
+        if special_hint:
+            formula_expression, formula_target_unit = special_hint
+        else:
+            try:
+                formula = get_formula(fol)
+            except KeyError:
+                formula = None
+            if formula is not None:
+                formula_expression = formula.expression
+                formula_target_unit = formula.target_unit
 
     normalized_proof_steps: list[dict[str, Any]] = []
     for step in proof_steps or []:

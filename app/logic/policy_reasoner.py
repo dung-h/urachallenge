@@ -57,35 +57,51 @@ def _condition_parts(text: str) -> list[str]:
     return [re.sub(r"^and\s+", "", part.strip()) for part in re.split(r"\s+and\s+", cleaned) if part.strip()]
 
 
+def _split_or_conditions(text: str) -> list[str]:
+    return [part.strip() for part in re.split(r"\s+or\s+", text) if part.strip()]
+
+
 def _parse_rule(premise: Premise) -> PolicyRule | None:
     low = norm(premise.text)
+    student_prefix = r"(?:(?:a|an|the)\s+student(?:s)?|students?)"
     if low.startswith("no "):
         match = re.match(r"no students? (?:with|who)?\s*(.+?) are (.+)$", low)
         if match:
             return PolicyRule(premise, _condition_parts(match.group(1)), _clean_outcome(match.group(2)), positive=False, blocking=True)
     patterns = [
-        (r"students? (?:with|who) (.+?) are not (.+)$", False, True),
-        (r"students? (?:with|who) (.+?) do not (.+)$", False, True),
-        (r"students? (?:with|who) (.+?) are ineligible for (.+)$", True, False),
-        (r"students? (?:with|who) (.+?) are (.+)$", True, False),
-        (r"students? (?:with|who) (.+?) may (.+)$", True, False),
-        (r"students? (?:with|who) (.+?) meet (.+)$", True, False),
-        (r"students? (?:with|who) (.+?) satisfy (.+)$", True, False),
-        (r"students? (?:with|who) (.+?) are placed on (.+)$", True, False),
-        (r"students? (?:with|who) (.+?) do not meet (.+)$", False, True),
-        (r"students? (?:with|who) (.+?) do not satisfy (.+)$", False, True),
-        (r"absences? (?:with|supported by) (.+?) are (.+)$", True, False),
+        (rf"{student_prefix} receives? (.+?) if (.+)$", 2, 1, True, False, None),
+        (rf"{student_prefix} may register for (.+?) only if (.+)$", 2, 1, True, False, "register for "),
+        (rf"{student_prefix} may (register for .+?) only if (.+)$", 2, 1, True, False, None),
+        (rf"{student_prefix} is (.+?) only if (.+)$", 2, 1, True, False, None),
+        (rf"{student_prefix} are (.+?) only if (.+)$", 2, 1, True, False, None),
+        (rf"{student_prefix} receives? (.+?) only if (.+)$", 2, 1, True, False, None),
+        (rf"{student_prefix} may (.+?) if (.+)$", 2, 1, True, False, None),
+        (rf"{student_prefix} (?:with|who) (.+?) are not (.+)$", 1, 2, False, True, None),
+        (rf"{student_prefix} (?:with|who) (.+?) do not (.+)$", 1, 2, False, True, None),
+        (rf"{student_prefix} (?:with|who) (.+?) are ineligible for (.+)$", 1, 2, False, True, "ineligible for "),
+        (rf"{student_prefix} (?:with|who) (.+?) are (.+)$", 1, 2, True, False, None),
+        (rf"{student_prefix} (?:with|who) (.+?) may (.+)$", 1, 2, True, False, None),
+        (rf"{student_prefix} (?:with|who) (.+?) meet (.+)$", 1, 2, True, False, None),
+        (rf"{student_prefix} (?:with|who) (.+?) satisfy (.+)$", 1, 2, True, False, None),
+        (rf"{student_prefix} (?:with|who) (.+?) are placed on (.+)$", 1, 2, True, False, "placed on "),
+        (rf"{student_prefix} (?:with|who) (.+?) do not meet (.+)$", 1, 2, False, True, None),
+        (rf"{student_prefix} (?:with|who) (.+?) do not satisfy (.+)$", 1, 2, False, True, None),
+        (r"absences? (?:with|supported by) (.+?) are (.+)$", 1, 2, True, False, None),
+        (r"(.+?) cancels (?:the )?(.+)$", 1, 2, False, True, None),
     ]
-    for pattern, positive, blocking in patterns:
+    for pattern, condition_group, outcome_group, positive, blocking, outcome_prefix in patterns:
         match = re.match(pattern, low)
-        if match:
-            outcome = _clean_outcome(match.group(2))
-            if " only with " in outcome:
-                main, extra = outcome.split(" only with ", 1)
-                return PolicyRule(premise, _condition_parts(match.group(1)) + [extra], main, positive=positive, blocking=blocking)
-            if "ineligible for" in low and positive:
-                outcome = "ineligible for " + outcome
-            return PolicyRule(premise, _condition_parts(match.group(1)), outcome, positive=positive, blocking=blocking)
+        if not match:
+            continue
+        condition_text = match.group(condition_group)
+        outcome_text = match.group(outcome_group)
+        if outcome_prefix:
+            outcome_text = outcome_prefix + outcome_text
+        outcome = _clean_outcome(outcome_text)
+        if " only with " in outcome:
+            main, extra = outcome.split(" only with ", 1)
+            return PolicyRule(premise, _condition_parts(condition_text) + [extra], main, positive=positive, blocking=blocking)
+        return PolicyRule(premise, _condition_parts(condition_text), outcome, positive=positive, blocking=blocking)
     return None
 
 
@@ -114,7 +130,52 @@ def _contradiction(premises: list[Premise], target: str) -> PolicyDecision | Non
     return None
 
 
+def _direct_fact_contradiction(premises: list[Premise], target: str) -> PolicyDecision | None:
+    positive: Premise | None = None
+    negative: Premise | None = None
+    for premise in premises:
+        if _parse_rule(premise):
+            continue
+        low = norm(premise.text)
+        if low.startswith(("all ", "no ", "students ", "student ", "a student ", "an student ", "the student ")):
+            continue
+        if overlap(target, low) < 2:
+            continue
+        if re.search(r"\b(?:does not|do not|not|never)\b", low):
+            negative = premise
+        else:
+            positive = premise
+    if positive and negative:
+        return PolicyDecision(
+            "unknown",
+            [positive, negative],
+            "directly contradictory policy facts",
+            ["Found a positive target fact", "Found a negative target fact", "Returned unknown because both cannot be accepted together"],
+            0.72,
+        )
+    return None
+
+
 def _condition_satisfied(condition: str, facts: list[Premise]) -> tuple[bool | None, Premise | None, str]:
+    disjuncts = _split_or_conditions(condition)
+    if len(disjuncts) > 1:
+        saw_missing = False
+        false_fact: Premise | None = None
+        false_detail = ""
+        for part in disjuncts:
+            ok, fact, detail = _condition_satisfied(part, facts)
+            if ok is True:
+                return True, fact, detail
+            if ok is False:
+                false_fact = fact or false_fact
+                false_detail = detail
+            else:
+                saw_missing = True
+        if saw_missing:
+            return None, None, f"missing condition: {condition}"
+        if false_fact:
+            return False, false_fact, false_detail or f"missing condition: {condition}"
+        return None, None, f"missing condition: {condition}"
     threshold = parse_threshold(condition)
     if threshold:
         for fact in facts:
@@ -143,6 +204,8 @@ def _condition_satisfied(condition: str, facts: list[Premise]) -> tuple[bool | N
 def _target_matches(rule: PolicyRule, target: str) -> bool:
     if overlap(rule.outcome, target) >= 1:
         return True
+    if "eligible" in target and "ineligible" in rule.outcome:
+        return overlap(rule.outcome.replace("ineligible", ""), target.replace("eligible", "")) >= 1
     if "eligible" in target and "eligible" in rule.outcome:
         return overlap(rule.outcome.replace("eligible", ""), target.replace("eligible", "")) >= 1
     if "register" in target and "register" in rule.outcome:
@@ -197,6 +260,9 @@ def solve_policy(question: str, premises: list[Premise]) -> PolicyDecision | Non
     if "which option" in norm(question):
         if any(norm(p.text).startswith("some ") for p in premises):
             return PolicyDecision("C", select_premises(question, premises), "MCQ insufficient academic policy information", ["Some-premise does not entail the specific student", "Selected unknown option"], 0.8)
+    direct_conflict = _direct_fact_contradiction(premises, target)
+    if direct_conflict:
+        return direct_conflict
     explicit = _explicit_negative(premises, target)
     if explicit:
         return explicit

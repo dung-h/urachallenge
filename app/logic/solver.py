@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from app.guardrails import guardrail_prompt_text
 from app.logic.policy_reasoner import solve_policy
 from app.logic.premise_selector import Premise, hallucinated_premises, normalize_premises, select_premises
 from app.logic.proof_trace import ProofStep, build_proof_steps
@@ -835,6 +836,7 @@ def solve(
     enable_mcq_symbolic: bool = False,
     choices: list[str] | None = None,
 ) -> LogicSolution:
+    question = guardrail_prompt_text(question).normalized_text
     normalized = normalize_premises(premises)
     
     # MCQ symbolic path: experiment-only, disabled by default.
@@ -907,14 +909,22 @@ def solve(
         confidence = 0.55
     elif answer == "unknown" and any(token in rule for token in ["negated antecedent", "conditional premise", "directly contradictory", "does not identify", "premises support both"]):
         confidence = 0.72
+    model_calls = 0
     if use_llm and llm_client and (confidence < 0.7 or answer == "unknown"):
         suggestion = getattr(llm_client, "suggest_logic", lambda *_: None)(question, [f"{p.id}: {p.text}" for p in normalized])
+        model_calls = 1
         if isinstance(suggestion, dict):
             candidate = normalize_answer_label(suggestion.get("answer"))
             ids_raw = suggestion.get("used_premise_ids") or suggestion.get("premises") or []
             ids = {str(pid).upper() for pid in ids_raw if re.fullmatch(r"P\d+", str(pid).upper())}
             hallucinated_candidate = hallucinated_premises(ids, normalized)
-            if (candidate in {"yes", "no", "unknown"} or re.fullmatch(r"[A-E]", candidate)) and ids and not hallucinated_candidate:
+            baseline_unknown_override = answer == "unknown" and candidate != "unknown"
+            if (
+                (candidate in {"yes", "no", "unknown"} or re.fullmatch(r"[A-E]", candidate))
+                and ids
+                and not hallucinated_candidate
+                and not baseline_unknown_override
+            ):
                 selected = [p for p in normalized if p.id in ids]
                 solution = LogicSolution(
                     answer=candidate,
@@ -938,6 +948,7 @@ def solve(
         confidence=confidence,
         hallucinated_premises=hallucinated,
         llm_fallback_used=False,
+        model_calls=model_calls,
         proof_steps=build_proof_steps(answer, selected, rule, confidence),
     )
     if enable_z3_sidecar:

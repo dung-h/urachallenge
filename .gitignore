@@ -29,6 +29,7 @@ outputs/
 # Local data / vendor downloads
 archive/
 third_party/
+clones/
 .opencode/node_modules/
 .opencode/package.json
 .opencode/package-lock.json

@@ -24,6 +24,18 @@ def physics_explanation(formula: Formula, variables: dict[str, float], answer: f
             )
             + "."
         )
+    elif {"V_primary", "N_primary", "N_secondary"}.issubset(variables):
+        parts.append(
+            "Extracted SI variables: "
+            + ", ".join(
+                [
+                    f"V_primary={format_si(variables['V_primary'], 'V')}",
+                    f"N_primary={variables['N_primary']:.6g}",
+                    f"N_secondary={variables['N_secondary']:.6g}",
+                ]
+            )
+            + "."
+        )
     else:
         vals = ", ".join(f"{key}={value:.6g}" for key, value in variables.items())
         parts.append(f"Extracted SI variables: {vals}.")

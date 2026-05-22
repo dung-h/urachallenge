@@ -35,7 +35,7 @@ def parse_threshold(text: str) -> ThresholdCondition | None:
 def metric_value(text: str, metric: str) -> float | None:
     low = text.lower()
     if metric in {"gpa", "cpa"}:
-        match = re.search(rf"\b{metric}\s+([0-9]+(?:\.[0-9]+)?)\b", low)
+        match = re.search(rf"\b{metric}\s*(?:is|=)?\s*([0-9]+(?:\.[0-9]+)?)\b", low)
         return float(match.group(1)) if match else None
     if metric == "credits":
         match = re.search(r"(?:completed\s+)?([0-9]+(?:\.[0-9]+)?)\s+credits?\b", low)

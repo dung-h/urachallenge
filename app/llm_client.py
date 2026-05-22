@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Protocol
 import json
 import re
+import time
 
 import httpx
 import yaml
@@ -59,6 +60,7 @@ class OpenAICompatibleLLMClient:
         self.timeout = timeout
         self.enabled = enabled
         self.prompts = load_prompts()
+        self.call_traces: list[dict[str, Any]] = []
 
     def chat(self, role: str, user: str, max_tokens: int = 256, response_format: bool = False) -> LLMResult:
         if not self.enabled:
@@ -74,30 +76,82 @@ class OpenAICompatibleLLMClient:
         }
         if response_format:
             payload["response_format"] = {"type": "json_object"}
+        started = time.perf_counter()
+        trace: dict[str, Any] = {
+            "backend": "openai_compatible",
+            "base_url": self.base_url,
+            "model": self.model,
+            "role": role,
+            "max_tokens": max_tokens,
+            "response_format": "json_object" if response_format else None,
+            "system_prompt": system,
+            "user_prompt": user,
+            "status": "started",
+        }
         try:
             with httpx.Client(timeout=self.timeout) as client:
                 response = client.post(f"{self.base_url}/chat/completions", json=payload)
                 response.raise_for_status()
                 obj = response.json()
         except Exception as exc:
+            trace.update(
+                {
+                    "status": "error",
+                    "latency_ms": (time.perf_counter() - started) * 1000,
+                    "error": str(exc),
+                }
+            )
+            self.call_traces.append(trace)
             return LLMResult(content="", error=str(exc))
         choices = obj.get("choices") or []
         message = (choices[0].get("message") or {}) if choices else {}
-        return LLMResult(content=message.get("content") or message.get("reasoning_content") or "")
+        content = message.get("content") or message.get("reasoning_content") or ""
+        trace.update(
+            {
+                "status": "ok",
+                "latency_ms": (time.perf_counter() - started) * 1000,
+                "raw_response": content,
+                "finish_reason": choices[0].get("finish_reason") if choices else None,
+                "usage": obj.get("usage"),
+            }
+        )
+        self.call_traces.append(trace)
+        return LLMResult(content=content)
 
     def _json_chat(self, role: str, user: str, max_tokens: int = 256) -> dict[str, Any] | None:
         result = self.chat(role, user, max_tokens=max_tokens, response_format=True)
         if result.error or not result.content.strip():
+            if self.call_traces:
+                self.call_traces[-1]["json_validity"] = False
+                self.call_traces[-1]["json_parse_error"] = result.error or "empty_response"
             return None
         try:
-            return json.loads(result.content)
-        except Exception:
+            parsed = json.loads(result.content)
+            if self.call_traces:
+                self.call_traces[-1]["json_validity"] = True
+                self.call_traces[-1]["repaired_json_validity"] = False
+            return parsed
+        except Exception as exc:
+            first_error = str(exc)
             match = re.search(r"\{.*\}", result.content, re.S)
             if not match:
+                if self.call_traces:
+                    self.call_traces[-1]["json_validity"] = False
+                    self.call_traces[-1]["repaired_json_validity"] = False
+                    self.call_traces[-1]["json_parse_error"] = first_error
                 return None
             try:
-                return json.loads(match.group(0))
-            except Exception:
+                parsed = json.loads(match.group(0))
+                if self.call_traces:
+                    self.call_traces[-1]["json_validity"] = False
+                    self.call_traces[-1]["repaired_json_validity"] = True
+                return parsed
+            except Exception as repair_exc:
+                if self.call_traces:
+                    self.call_traces[-1]["json_validity"] = False
+                    self.call_traces[-1]["repaired_json_validity"] = False
+                    self.call_traces[-1]["json_parse_error"] = first_error
+                    self.call_traces[-1]["json_repair_error"] = str(repair_exc)
                 return None
 
     def suggest_physics(self, question: str) -> dict[str, Any] | None:
@@ -162,6 +216,7 @@ class HuggingFaceLLMClient:
         self.timeout = timeout
         self.enabled = enabled
         self.prompts = load_prompts()
+        self.call_traces: list[dict[str, Any]] = []
         try:
             import torch
             from transformers import pipeline
@@ -183,13 +238,27 @@ class HuggingFaceLLMClient:
     def _generate(self, prompt: str, max_new_tokens: int = 256) -> str:
         if not self.enabled:
             raise LLMClientNotConfigured("HuggingFace LLM fallback is disabled by default.")
+        started = time.perf_counter()
+        trace: dict[str, Any] = {
+            "backend": "huggingface",
+            "model": self.model,
+            "max_new_tokens": max_new_tokens,
+            "user_prompt": prompt,
+            "status": "started",
+        }
         try:
             out = self._pipe(prompt, max_new_tokens=max_new_tokens, do_sample=False, return_full_text=True)
             if not out:
+                trace.update({"status": "empty", "latency_ms": (time.perf_counter() - started) * 1000})
+                self.call_traces.append(trace)
                 return ""
             text = out[0].get("generated_text") or ""
+            trace.update({"status": "ok", "latency_ms": (time.perf_counter() - started) * 1000, "raw_response": text})
+            self.call_traces.append(trace)
             return text
-        except Exception:
+        except Exception as exc:
+            trace.update({"status": "error", "latency_ms": (time.perf_counter() - started) * 1000, "error": str(exc)})
+            self.call_traces.append(trace)
             return ""
 
     def _json_generate(self, prompt: str, max_new_tokens: int = 256) -> dict[str, Any] | None:

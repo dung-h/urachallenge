@@ -4,6 +4,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.guardrails import guardrail_prompt_text
 from app.physics.formulas import get_formula
 from app.physics.parser import ParsedPhysicsProblem, parse_physics_question
 from app.physics.templates import physics_explanation
@@ -57,9 +58,18 @@ def _compute(parsed: ParsedPhysicsProblem, fallback_used: bool = False, model_ca
     answer = format_best_unit(answer_value, formula.target_unit)
     cot = [
         f"Parsed target: {parsed.target_quantity}",
-        f"Selected formula: {formula.formula_id}",
+        f"Selected formula: {formula.expression} ({formula.formula_id})",
         f"Computed with Python: {answer}",
     ]
+    if formula.formula_id == "transformer_secondary_voltage":
+        cot.insert(
+            2,
+            (
+                "Substituted: V_secondary = "
+                f"{parsed.variables['V_primary']:.6g} * "
+                f"{parsed.variables['N_secondary']:.6g}/{parsed.variables['N_primary']:.6g}"
+            ),
+        )
     confidence = 0.95 if not getattr(parsed, "ambiguity", False) else 0.8
     return PhysicsSolution(
         success=True,
@@ -83,7 +93,7 @@ def solve(question: str, use_llm_extraction: bool = True, use_search: bool = Fal
     fallback branches so the module remains importable and predictable while
     we prune archived helpers.
     """
-    parsed = parse_physics_question(question)
+    parsed = parse_physics_question(guardrail_prompt_text(question).normalized_text)
     return _compute(parsed)
 
 
