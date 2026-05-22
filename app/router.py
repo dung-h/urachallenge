@@ -558,9 +558,7 @@ def predict_with_metadata(
             metadata["solver_used"] = f"hybrid_{hybrid_result.method}"
             metadata["z3_status"] = hybrid_result.z3_status
             metadata["conclusion_fol"] = hybrid_result.conclusion_fol
-            metadata["model_calls"] += 1
-            if "z3" in hybrid_result.method:
-                metadata["model_calls"] += 1
+            metadata["model_calls"] += int(getattr(hybrid_result, "model_calls", 0) or 0)
             response = QAResponse(
                 answer=hybrid_result.answer,
                 explanation=hybrid_result.explanation,

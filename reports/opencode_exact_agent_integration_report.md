@@ -86,3 +86,31 @@ Date/time: 2026-05-22 Asia/Bangkok
 - `qwen2.5:7b` can now call the helper with the short preset command, but its final prose can still paraphrase instead of copying the helper line exactly.
 - The reliable artifact is the helper/tool output line, for example:
   `validated_backend_answer=unknown trace_url=/trace/opencode-sr019 model_calls=1 raw_model_proposal_answer=yes authority=validated_backend_response`
+
+## Update: Hybrid Symbolic Path
+
+Date/time: 2026-05-22 Asia/Bangkok
+
+### What Changed
+
+- Added `app/logic/hybrid_solver.py`.
+- The hybrid solver translates only known-safe natural-language patterns to symbolic predicates.
+- Z3 is used as prover when translation is deterministic and complete.
+- Required-condition language such as `A requires B` is translated in the safe direction `A -> B`, so satisfying `B` does not prove `A`.
+- Production defaults remain unchanged; `enable_hybrid_solver` is still off unless explicitly enabled.
+
+### Verification
+
+| Check | Result |
+| --- | --- |
+| Universal yes proof | pass |
+| Universal no proof | pass |
+| Required-condition trap | pass |
+| Router with `enable_hybrid_solver=True` | pass |
+| Focused pytest | 21 passed |
+
+### Example
+
+For `P1: Eligibility for the award requires submitting a portfolio` and `P2: Mira submitted a portfolio`, the hybrid path returns:
+
+`answer=unknown`, `z3_status=not_entailed`, `fol=eligible_award(mira)`, `model_calls=0`.
