@@ -30,6 +30,38 @@ def test_hybrid_solver_proves_safe_universal_no() -> None:
     assert "Therefore the answer is no" in result.explanation
 
 
+def test_hybrid_solver_explains_multi_hop_yes() -> None:
+    result = solve_hybrid(
+        "Is Nova an animal?",
+        [
+            "P1: All robins are birds.",
+            "P2: All birds are animals.",
+            "P3: Nova is a robin.",
+        ],
+    )
+    assert result.answer == "yes"
+    assert "P3 says" in result.explanation
+    assert "Applying P1 to Nova gives that Nova is a bird" in result.explanation
+    assert "Applying P2 to Nova gives that Nova is an animal" in result.explanation
+    assert "Therefore the answer is yes" in result.explanation
+
+
+def test_hybrid_solver_explains_multi_hop_no_without_reversing_claim() -> None:
+    result = solve_hybrid(
+        "Is Nova a mammal?",
+        [
+            "P1: All robins are birds.",
+            "P2: No birds are mammals.",
+            "P3: Nova is a robin.",
+        ],
+    )
+    assert result.answer == "no"
+    assert "Applying P1 to Nova gives that Nova is a bird" in result.explanation
+    assert "Applying P2 to Nova rules out that Nova is a mammal" in result.explanation
+    assert "determines that Nova is a mammal" not in result.explanation
+    assert "Therefore the answer is no" in result.explanation
+
+
 def test_hybrid_solver_does_not_flip_required_condition() -> None:
     result = solve_hybrid(
         "Is Mira eligible for the award?",

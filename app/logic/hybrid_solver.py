@@ -45,6 +45,12 @@ class _Translation:
     unsupported: list[str]
 
 
+@dataclass(frozen=True)
+class _ReasoningPath:
+    fact: _Fact
+    rules: list[_Rule]
+
+
 _STOPWORDS = {"a", "an", "the", "is", "are", "be", "being", "been", "for", "to", "of"}
 
 
@@ -102,13 +108,18 @@ def _human_predicate(predicate: str) -> str:
     return text or "the queried property"
 
 
+def _article(noun_phrase: str) -> str:
+    first = noun_phrase[:1].lower()
+    return "an" if first in {"a", "e", "i", "o", "u"} else "a"
+
+
 def _claim_phrase(subject: str, predicate: str) -> str:
     subject_text = _human_subject(subject)
     predicate_text = _human_predicate(predicate)
     if predicate.startswith("eligible_"):
         return f"{subject_text} is {predicate_text}"
     if predicate in {"bird", "mammal", "animal", "machine", "robot", "student", "teacher", "applicant"}:
-        return f"{subject_text} is a {predicate_text}"
+        return f"{subject_text} is {_article(predicate_text)} {predicate_text}"
     return f"{subject_text} satisfies {predicate_text}"
 
 
@@ -243,6 +254,70 @@ def _find_direct_chain(
     return None
 
 
+def _find_reasoning_path(
+    translated: _Translation,
+    query_subject: str,
+    query_predicate: str,
+    *,
+    negative: bool = False,
+) -> _ReasoningPath | None:
+    queue: list[tuple[str, _Fact, list[_Rule]]] = [
+        (fact.predicate, fact, []) for fact in translated.facts if fact.subject == query_subject
+    ]
+    visited = {predicate for predicate, _, _ in queue}
+
+    while queue:
+        current_predicate, fact, rules = queue.pop(0)
+        if not negative and current_predicate == query_predicate:
+            return _ReasoningPath(fact=fact, rules=rules)
+
+        for rule in translated.rules:
+            if rule.antecedent != current_predicate:
+                continue
+            next_rules = [*rules, rule]
+            if negative and rule.kind == "implies_not" and rule.consequent == query_predicate:
+                return _ReasoningPath(fact=fact, rules=next_rules)
+            if rule.kind != "implies":
+                continue
+            if not negative and rule.consequent == query_predicate:
+                return _ReasoningPath(fact=fact, rules=next_rules)
+            if rule.consequent not in visited:
+                visited.add(rule.consequent)
+                queue.append((rule.consequent, fact, next_rules))
+    return None
+
+
+def _path_explanation(
+    path: _ReasoningPath,
+    query_subject: str,
+    query_predicate: str,
+    *,
+    negative: bool = False,
+) -> str:
+    subject = _human_subject(query_subject)
+    sentences = [_premise_step(path.fact.premise_id, path.fact.text)]
+    current_predicate = path.fact.predicate
+
+    for rule in path.rules:
+        sentences.append(_premise_step(rule.premise_id, rule.text))
+        if rule.kind == "implies_not":
+            sentences.append(
+                f"Applying {rule.premise_id} to {subject} rules out that "
+                f"{_claim_phrase(query_subject, rule.consequent)}."
+            )
+            continue
+        current_predicate = rule.consequent
+        sentences.append(
+            f"Applying {rule.premise_id} to {subject} gives that "
+            f"{_claim_phrase(query_subject, current_predicate)}."
+        )
+
+    if not path.rules:
+        sentences.append(f"The premise directly states that {_claim_phrase(query_subject, query_predicate)}.")
+    sentences.append(f"Therefore the answer is {'no' if negative else 'yes'}.")
+    return " ".join(sentences)
+
+
 def _find_required_condition_gap(
     translated: _Translation,
     query_subject: str,
@@ -273,6 +348,9 @@ def _build_reasoning_explanation(
     query_claim = _claim_phrase(query_subject, query_predicate)
 
     if answer == "yes":
+        path = _find_reasoning_path(translated, query_subject, query_predicate)
+        if path:
+            return _path_explanation(path, query_subject, query_predicate)
         chain = _find_direct_chain(translated, query_subject, query_predicate)
         if chain:
             rule, fact = chain
@@ -284,6 +362,9 @@ def _build_reasoning_explanation(
             )
 
     if answer == "no":
+        path = _find_reasoning_path(translated, query_subject, query_predicate, negative=True)
+        if path:
+            return _path_explanation(path, query_subject, query_predicate, negative=True)
         chain = _find_direct_chain(translated, query_subject, query_predicate, negative=True)
         if chain:
             rule, fact = chain
@@ -322,6 +403,8 @@ def _build_reasoning_explanation(
             f"{premise_steps} The premises do not provide a complete chain to prove or disprove "
             f"that {query_claim}. Therefore the answer is unknown."
         )
+    if answer == "no":
+        return f"{premise_steps} The premises rule out that {query_claim}. Therefore the answer is no."
     return (
         f"{premise_steps} The supported premise chain determines that {query_claim}. "
         f"Therefore the answer is {answer}."
