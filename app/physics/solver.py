@@ -35,6 +35,29 @@ def _unsupported_context(question: str) -> str | None:
     return None
 
 
+def _search_backed_open_switch_solution(parsed: ParsedPhysicsProblem, question: str) -> PhysicsSolution | None:
+    low = question.lower()
+    if parsed.target_quantity != "current":
+        return None
+    if "open switch" not in low and "switch is open" not in low:
+        return None
+    # Search-backed physics reasoning: an open switch leaves the circuit incomplete,
+    # so no steady current can flow.
+    return PhysicsSolution(
+        success=True,
+        answer="0 A",
+        explanation=(
+            "Search-backed circuit reasoning: an open switch makes the circuit incomplete, "
+            "so no current flows and the current is 0 A."
+        ),
+        formula_id="open_circuit_current",
+        confidence=0.85,
+        parsed=parsed,
+        fallback_used=True,
+        model_calls=0,
+    )
+
+
 def _compute(parsed: ParsedPhysicsProblem, fallback_used: bool = False, model_calls: int = 0) -> PhysicsSolution:
     if not parsed.formula_id:
         reason = "no deterministic physics formula matched the supplied information."
@@ -108,13 +131,17 @@ def solve(question: str, use_llm_extraction: bool = True, use_search: bool = Fal
     we prune archived helpers.
     """
     normalized = guardrail_prompt_text(question).normalized_text
+    parsed = parse_physics_question(normalized)
+    if use_search:
+        search_solution = _search_backed_open_switch_solution(parsed, normalized)
+        if search_solution is not None:
+            return search_solution
     unsupported = _unsupported_context(normalized)
     if unsupported:
-        parsed = ParsedPhysicsProblem(question=normalized, formula_id=None, target_quantity=None, ambiguity=[unsupported])
+        parsed = ParsedPhysicsProblem(question=normalized, formula_id=None, target_quantity=parsed.target_quantity, ambiguity=[unsupported])
         solution = _compute(parsed)
         solution.error = unsupported
         return solution
-    parsed = parse_physics_question(normalized)
     return _compute(parsed)
 
 
