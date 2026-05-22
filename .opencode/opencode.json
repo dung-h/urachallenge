@@ -36,15 +36,14 @@
       "description": "URA EXACT challenge operator that routes through the local validated app and inspects traces.",
       "mode": "primary",
       "model": "ollama/qwen2.5:7b",
-      "prompt": "You are the OpenCode operator for the URA EXACT Challenge repo. For concrete challenge questions, be helper-first: run scripts/exact_agent_request.py, inspect /predict plus /trace output, and report only the validated backend response as authority. When calling the bash tool, always provide both description and command. Raw model reasoning is proposal-only. Never override deterministic unknown with yes/no unless backend validation or a narrow solver patch plus focused tests proves it.",
+      "prompt": "You are the OpenCode helper operator for the URA EXACT Challenge repo. For concrete challenge questions, run scripts/exact_agent_request.py first and report only the validated backend response as authority. Do not call the skill tool in this agent; this runner is helper-only to avoid tool loops. Prefer one-line helper presets when they fit: python scripts/exact_agent_request.py --report-line --preset sr019, python scripts/exact_agent_request.py --report-line --preset physx_001, python scripts/exact_agent_request.py --report-line --preset sr005, or python scripts/exact_agent_request.py --report-line --preset acad_001. When calling the bash tool, always provide both description and command; never call bash with command only. The bash command must be exactly one python scripts/exact_agent_request.py command; do not append echo, &&, pipes, redirects, or extra shell text. In final text, copy the helper output line and state that raw_model_proposal_answer is not authority. Raw model reasoning is proposal-only. Never override deterministic unknown with yes/no unless backend validation or a narrow solver patch plus focused tests proves it.",
       "permission": {
         "read": "allow",
         "glob": "allow",
         "grep": "allow",
         "list": "allow",
         "skill": {
-          "*": "ask",
-          "exact-*": "allow"
+          "*": "deny"
         },
         "bash": {
           "*": "ask",

@@ -58,3 +58,31 @@ Date/time: 2026-05-21 Asia/Saigon
 - Added root ignore rules for `.opencode/node_modules/` and local OpenCode package/lock files.
 - Confirmed no lingering `opencode run` process remained after smoke tests.
 - Did not touch `clones/`.
+
+## Update: Priority 1 Stabilization
+
+Date/time: 2026-05-22 Asia/Bangkok
+
+### What Changed
+
+- Added built-in helper presets: `acad_001`, `sr019`, `physx_001`, and `sr005`.
+- Added compact helper outputs via `--summary` and `--report-line`.
+- Added explicit fields that separate `validated_backend_answer` from `raw_model_proposal_answer`.
+- Made helper tolerant of OpenCode's harmless `--no-edit-files` addition.
+- Updated `exact-runner` to be helper-only and deny skill calls to prevent repeated skill-load loops.
+
+### Verification
+
+| Check | Result |
+| --- | --- |
+| `python -m json.tool .opencode/opencode.json` | pass |
+| `python -m py_compile scripts/exact_agent_request.py` | pass |
+| Helper report-line presets | 4/4 pass |
+| OpenCode exact-runner helper command | helper command succeeds |
+| Focused pytest | 29 passed |
+
+### Remaining OpenCode Model Risk
+
+- `qwen2.5:7b` can now call the helper with the short preset command, but its final prose can still paraphrase instead of copying the helper line exactly.
+- The reliable artifact is the helper/tool output line, for example:
+  `validated_backend_answer=unknown trace_url=/trace/opencode-sr019 model_calls=1 raw_model_proposal_answer=yes authority=validated_backend_response`
