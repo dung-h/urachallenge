@@ -41,7 +41,7 @@ def metric_value(text: str, metric: str) -> float | None:
         match = re.search(r"(?:completed\s+)?([0-9]+(?:\.[0-9]+)?)\s+credits?\b", low)
         return float(match.group(1)) if match else None
     if metric == "attendance":
-        match = re.search(r"attendance\s+([0-9]+(?:\.[0-9]+)?)\s*percent\b", low)
+        match = re.search(r"attendance\s*(?:is|=)?\s*([0-9]+(?:\.[0-9]+)?)\s*percent\b", low)
         return float(match.group(1)) if match else None
     return None
 

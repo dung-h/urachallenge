@@ -26,6 +26,15 @@ class PhysicsSolution:
     model_calls: int = 0
 
 
+def _unsupported_context(question: str) -> str | None:
+    low = question.lower()
+    if "open switch" in low or "switch is open" in low:
+        return "open_switch_context"
+    if "ladder network" in low or " ladder " in low:
+        return "unsupported_ladder_topology"
+    return None
+
+
 def _compute(parsed: ParsedPhysicsProblem, fallback_used: bool = False, model_calls: int = 0) -> PhysicsSolution:
     if not parsed.formula_id:
         return PhysicsSolution(
@@ -93,7 +102,14 @@ def solve(question: str, use_llm_extraction: bool = True, use_search: bool = Fal
     fallback branches so the module remains importable and predictable while
     we prune archived helpers.
     """
-    parsed = parse_physics_question(guardrail_prompt_text(question).normalized_text)
+    normalized = guardrail_prompt_text(question).normalized_text
+    unsupported = _unsupported_context(normalized)
+    if unsupported:
+        parsed = ParsedPhysicsProblem(question=normalized, formula_id=None, target_quantity=None, ambiguity=[unsupported])
+        solution = _compute(parsed)
+        solution.error = unsupported
+        return solution
+    parsed = parse_physics_question(normalized)
     return _compute(parsed)
 
 

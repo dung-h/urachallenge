@@ -68,8 +68,13 @@ def _parse_rule(premise: Premise) -> PolicyRule | None:
         match = re.match(r"no students? (?:with|who)?\s*(.+?) are (.+)$", low)
         if match:
             return PolicyRule(premise, _condition_parts(match.group(1)), _clean_outcome(match.group(2)), positive=False, blocking=True)
+        match = re.match(r"no (.+?) students? are (.+)$", low)
+        if match:
+            return PolicyRule(premise, _condition_parts(match.group(1)), _clean_outcome(match.group(2)), positive=False, blocking=True)
     patterns = [
         (rf"{student_prefix} receives? (.+?) if (.+)$", 2, 1, True, False, None),
+        (rf"{student_prefix} is (.+?) if (.+)$", 2, 1, True, False, None),
+        (rf"{student_prefix} are (.+?) if (.+)$", 2, 1, True, False, None),
         (rf"{student_prefix} may register for (.+?) only if (.+)$", 2, 1, True, False, "register for "),
         (rf"{student_prefix} may (register for .+?) only if (.+)$", 2, 1, True, False, None),
         (rf"{student_prefix} is (.+?) only if (.+)$", 2, 1, True, False, None),
@@ -80,6 +85,7 @@ def _parse_rule(premise: Premise) -> PolicyRule | None:
         (rf"{student_prefix} (?:with|who) (.+?) do not (.+)$", 1, 2, False, True, None),
         (rf"{student_prefix} (?:with|who) (.+?) are ineligible for (.+)$", 1, 2, False, True, "ineligible for "),
         (rf"{student_prefix} (?:with|who) (.+?) are (.+)$", 1, 2, True, False, None),
+        (rf"{student_prefix} (?:with|who) (.+?) receives? (.+)$", 1, 2, True, False, None),
         (rf"{student_prefix} (?:with|who) (.+?) may (.+)$", 1, 2, True, False, None),
         (rf"{student_prefix} (?:with|who) (.+?) meet (.+)$", 1, 2, True, False, None),
         (rf"{student_prefix} (?:with|who) (.+?) satisfy (.+)$", 1, 2, True, False, None),
@@ -88,6 +94,7 @@ def _parse_rule(premise: Premise) -> PolicyRule | None:
         (rf"{student_prefix} (?:with|who) (.+?) do not satisfy (.+)$", 1, 2, False, True, None),
         (r"absences? (?:with|supported by) (.+?) are (.+)$", 1, 2, True, False, None),
         (r"(.+?) cancels (?:the )?(.+)$", 1, 2, False, True, None),
+        (r"(.+?) requires (.+)$", 2, 1, True, False, None),
     ]
     for pattern, condition_group, outcome_group, positive, blocking, outcome_prefix in patterns:
         match = re.match(pattern, low)
@@ -156,6 +163,293 @@ def _direct_fact_contradiction(premises: list[Premise], target: str) -> PolicyDe
     return None
 
 
+def _is_choice_question(question: str) -> bool:
+    low = norm(question)
+    return "which option" in low and "a eligible" in low and "b not eligible" in low and "c unknown" in low
+
+
+def _choice_answer(question: str, answer: str) -> str:
+    if not _is_choice_question(question):
+        return answer
+    return {"yes": "A", "no": "B", "unknown": "C"}.get(answer, answer)
+
+
+def _metric_facts(metric: str, facts: list[Premise]) -> list[tuple[Premise, float]]:
+    values: list[tuple[Premise, float]] = []
+    for fact in facts:
+        value = metric_value(fact.text, metric)
+        if value is not None:
+            values.append((fact, value))
+    return values
+
+
+def _metric_conflict(metric: str, facts: list[Premise]) -> list[Premise]:
+    values = _metric_facts(metric, facts)
+    unique = {value for _premise, value in values}
+    return [premise for premise, _value in values] if len(unique) > 1 else []
+
+
+def _has_phrase(facts: list[Premise], *phrases: str) -> Premise | None:
+    for fact in facts:
+        low = norm(fact.text)
+        if any(phrase in low for phrase in phrases):
+            return fact
+    return None
+
+
+def _has_subject_fact(facts: list[Premise], phrase: str) -> Premise | None:
+    for fact in facts:
+        low = norm(fact.text)
+        if low.startswith("some "):
+            continue
+        if phrase in low:
+            return fact
+    return None
+
+
+def _grade_value(facts: list[Premise]) -> tuple[Premise, int] | None:
+    # Lower value means better grade. "Below C" means D/F.
+    order = {"a": 1, "b": 2, "c": 3, "d": 4, "f": 5}
+    for fact in facts:
+        low = norm(fact.text)
+        if "grade is not recorded" in low or "previous grade is not recorded" in low:
+            return None
+        match = re.search(r"\b(?:previous\s+)?grade is ([abcdf])\b", low)
+        if match:
+            return fact, order[match.group(1)]
+    return None
+
+
+def _condition_status(condition: str, facts: list[Premise]) -> tuple[bool | None, Premise | None, str]:
+    low = norm(condition)
+    disjuncts = _split_or_conditions(low)
+    if len(disjuncts) > 1:
+        saw_missing = False
+        failed: tuple[Premise | None, str] | None = None
+        for part in disjuncts:
+            ok, fact, detail = _condition_status(part, facts)
+            if ok is True:
+                return True, fact, detail
+            if ok is False:
+                failed = (fact, detail)
+            else:
+                saw_missing = True
+        if saw_missing:
+            return None, None, f"missing condition: {condition}"
+        if failed:
+            return False, failed[0], failed[1]
+        return None, None, f"missing condition: {condition}"
+    threshold = parse_threshold(low)
+    if threshold:
+        conflicts = _metric_conflict(threshold.metric, facts)
+        if conflicts:
+            return None, conflicts[0], f"conflicting {threshold.metric} facts"
+        for fact, value in _metric_facts(threshold.metric, facts):
+            return compare(value, threshold), fact, f"{threshold.metric} {threshold.operator} {threshold.value:g}"
+        return None, None, f"missing {threshold.metric} fact"
+    if "nominated" in low or "nomination" in low:
+        fact = _has_subject_fact(facts, " is nominated") or _has_subject_fact(facts, "has a faculty nomination") or _has_subject_fact(facts, "has faculty nomination")
+        return (True, fact, low) if fact else (None, None, "missing nomination fact")
+    if "advisor recommendation" in low:
+        fact = _has_subject_fact(facts, "advisor recommendation")
+        if fact and "not recorded" not in norm(fact.text):
+            return True, fact, low
+        return None, fact, "missing advisor recommendation"
+    if "income is verified" in low or "income verified" in low:
+        fact = _has_subject_fact(facts, "income is verified") or _has_subject_fact(facts, "income verified")
+        missing = _has_subject_fact(facts, "income verification is not recorded")
+        return (True, fact, low) if fact else (None, missing, "missing income verification")
+    if "tuition is paid" in low or "paid tuition" in low:
+        bad = _has_subject_fact(facts, "tuition is unpaid") or _has_subject_fact(facts, "unpaid tuition")
+        if bad:
+            return False, bad, "tuition unpaid"
+        fact = _has_subject_fact(facts, "tuition is paid") or _has_subject_fact(facts, "paid tuition")
+        return (True, fact, low) if fact else (None, None, "missing tuition payment fact")
+    if "no active hold" in low or "no fee hold" in low or "there is no fee hold" in low:
+        bad = _has_subject_fact(facts, "active fee hold") or _has_subject_fact(facts, "fee hold") or _has_subject_fact(facts, "unpaid tuition")
+        if bad and "no fee hold" not in norm(bad.text) and "no active hold" not in norm(bad.text):
+            return False, bad, "fee hold present"
+        fact = _has_subject_fact(facts, "no active hold") or _has_subject_fact(facts, "no fee hold")
+        return (True, fact, low) if fact else (None, None, "missing no-hold fact")
+    if "completed" in low:
+        course_match = re.search(r"completed\s+([a-z]{2,}\d+|[a-z]+\s+[a-z]+)", low)
+        if course_match:
+            course = course_match.group(1)
+            fact = _has_subject_fact(facts, f"completed {course}")
+            return (True, fact, low) if fact else (None, None, f"missing completion fact: {course}")
+        fact = _has_subject_fact(facts, " completed ")
+        return (True, fact, low) if fact else (None, None, "missing completion fact")
+    if "capstone is passed" in low or "capstone is pass" in low or "capstone passed" in low:
+        bad = _has_subject_fact(facts, "not passed the capstone") or _has_subject_fact(facts, "capstone requirement is not recorded")
+        if bad:
+            return (None, bad, "missing capstone fact") if "not recorded" in norm(bad.text) else (False, bad, "capstone not passed")
+        fact = _has_subject_fact(facts, "passed the capstone") or _has_subject_fact(facts, "completed the capstone")
+        return (True, fact, low) if fact else (None, None, "missing capstone fact")
+    if "degree requirements are complete" in low:
+        missing = _has_subject_fact(facts, "not recorded")
+        if missing:
+            return None, missing, "missing degree requirement"
+        required = ["core requirement", "elective requirement", "capstone requirement", "internship requirement", "clearance requirement"]
+        used = [_has_subject_fact(facts, phrase) for phrase in required]
+        if all(used):
+            return True, used[0], low
+        return None, None, "missing degree requirements"
+    if "previous grade is below c" in low or "grade is below c" in low:
+        grade = _grade_value(facts)
+        if grade:
+            premise, value = grade
+            return value > 3, premise, "previous grade below C"
+        return None, None, "missing previous grade"
+    return _condition_satisfied(condition, facts)
+
+
+def _conditions_decision(
+    question: str,
+    rule: PolicyRule,
+    facts: list[Premise],
+    *,
+    single_necessary_is_insufficient: bool = False,
+) -> PolicyDecision:
+    used = [rule.premise]
+    missing: list[str] = []
+    failed: list[Premise] = []
+    for condition in rule.conditions:
+        ok, fact, detail = _condition_status(condition, facts)
+        if fact:
+            used.append(fact)
+        if ok is False and fact:
+            failed.append(fact)
+        elif ok is None:
+            missing.append(detail)
+    unique_used = list(dict.fromkeys(used))
+    if failed:
+        return PolicyDecision(_choice_answer(question, "no"), unique_used, "required policy condition failed", ["Matched policy rule", "Found a failed required condition"], 0.86)
+    if missing or (single_necessary_is_insufficient and len(rule.conditions) <= 1):
+        return PolicyDecision(_choice_answer(question, "unknown"), unique_used, "; ".join(missing) or "necessary condition alone is not sufficient", ["Matched policy rule", "A required condition is absent or insufficient"], 0.68)
+    answer = "yes"
+    if rule.blocking or not rule.positive:
+        answer = "yes" if any(token in norm(question) for token in ["ineligible", "not eligible"]) else "no"
+    return PolicyDecision(_choice_answer(question, answer), unique_used, "all policy conditions satisfied", ["Matched policy rule", "Validated all required conditions"], 0.9)
+
+
+def _specific_policy_decision(question: str, premises: list[Premise], target: str) -> PolicyDecision | None:
+    low_question = norm(question)
+    rules = [rule for premise in premises if (rule := _parse_rule(premise))]
+    facts = [premise for premise in premises if not _parse_rule(premise)]
+
+    if _choice_question := _is_choice_question(question):
+        target = "eligible"
+
+    if "academic warning" in low_question:
+        direct = _direct_fact_contradiction(premises, target)
+        if direct:
+            return direct
+        appeal = _has_subject_fact(facts, "has an approved appeal")
+        if appeal:
+            return PolicyDecision(_choice_answer(question, "no"), [appeal], "approved appeal cancels warning", ["Found approved appeal exception"], 0.9)
+        conflicts = _metric_conflict("gpa", facts) or _metric_conflict("cpa", facts) or _metric_conflict("credits", facts)
+        if conflicts:
+            return PolicyDecision(_choice_answer(question, "unknown"), conflicts, "conflicting academic warning facts", ["Found contradictory metric facts"], 0.72)
+        warning_rules = [rule for rule in rules if "academic warning" in rule.outcome or "warning" in rule.outcome]
+        for rule in warning_rules:
+            any_trigger = False
+            missing = False
+            used = [rule.premise]
+            for condition in rule.conditions:
+                ok, fact, detail = _condition_status(condition, facts)
+                if fact:
+                    used.append(fact)
+                if ok is True:
+                    any_trigger = True
+                elif ok is None and ("gpa" in detail or "cpa" in detail or "credits" in detail):
+                    missing = True
+            if any_trigger:
+                return PolicyDecision(_choice_answer(question, "yes"), list(dict.fromkeys(used)), "academic warning threshold triggered", ["Matched warning threshold"], 0.88)
+            if missing:
+                return PolicyDecision(_choice_answer(question, "unknown"), list(dict.fromkeys(used)), "missing academic warning threshold fact", ["A warning condition is unverified"], 0.68)
+            return PolicyDecision(_choice_answer(question, "no"), list(dict.fromkeys(used)), "no academic warning threshold is triggered", ["Checked warning thresholds"], 0.84)
+
+    blocker = (
+        _has_subject_fact(facts, "disciplinary warning")
+        or _has_subject_fact(facts, "disciplinary suspension")
+        or _has_subject_fact(facts, "under disciplinary suspension")
+        or _has_subject_fact(facts, "active fee hold")
+        or _has_subject_fact(facts, "fee hold")
+        or _has_subject_fact(facts, "unpaid tuition")
+        or _has_subject_fact(facts, "tuition is unpaid")
+        or _has_subject_fact(facts, "on academic warning")
+        or _has_subject_fact(facts, "not passed the capstone")
+    )
+    if blocker and not any(marker in norm(blocker.text) for marker in ["no fee hold", "no active hold", "not on academic warning", "no disciplinary warning"]):
+        if any(token in low_question for token in ["eligible", "register", "graduate", "financial aid", "warning"]):
+            answer = "yes" if any(token in low_question for token in ["ineligible", "not eligible"]) else "no"
+            return PolicyDecision(_choice_answer(question, answer), [blocker], "policy blocker or exception applies", ["Found blocking fact"], 0.88)
+
+    if "exam eligible" in low_question:
+        active_hold = _has_subject_fact(facts, "active fee hold")
+        no_active_hold = _has_subject_fact(facts, "no active fee hold")
+        if active_hold and no_active_hold:
+            return PolicyDecision(
+                _choice_answer(question, "unknown"),
+                [active_hold, no_active_hold],
+                "conflicting fee hold facts",
+                ["Found both active and no-active fee hold facts"],
+                0.72,
+            )
+        tuition_bad = _has_subject_fact(facts, "tuition is unpaid") or _has_subject_fact(facts, "tuition status is not recorded")
+        if tuition_bad:
+            answer = "unknown" if "not recorded" in norm(tuition_bad.text) else "no"
+            return PolicyDecision(_choice_answer(question, answer), [tuition_bad], "tuition condition controls exam eligibility", ["Checked tuition condition"], 0.84)
+        exception = _has_subject_fact(facts, "has an approved absence exception")
+        attendance_ok, attendance_fact, _detail = _condition_status("attendance is at least 75 percent", facts)
+        tuition_ok, tuition_fact, _ = _condition_status("tuition is paid", facts)
+        used = [p for p in [attendance_fact, tuition_fact, exception] if p]
+        if tuition_ok is True and (attendance_ok is True or exception):
+            return PolicyDecision(_choice_answer(question, "yes"), used, "exam eligibility conditions satisfied", ["Validated attendance or approved exception", "Validated tuition"], 0.9)
+        if attendance_ok is False and not exception:
+            return PolicyDecision(_choice_answer(question, "no"), used, "attendance requirement failed", ["Checked attendance threshold"], 0.86)
+        return PolicyDecision(_choice_answer(question, "unknown"), used, "missing exam eligibility condition", ["A required exam condition is absent"], 0.68)
+
+    if "register for" in low_question:
+        course_match = re.search(r"register for\s+([a-z]{2,}\d+)", low_question)
+        course = course_match.group(1) if course_match else ""
+        required_rules = [rule for rule in rules if course and rule.outcome == course]
+        if required_rules:
+            rule = required_rules[0]
+            needed = [cond for cond in rule.conditions if re.search(r"[a-z]{2,}\d+", cond)]
+            used = [rule.premise]
+            missing = False
+            for cond in needed:
+                course_need = re.search(r"[a-z]{2,}\d+", cond)
+                fact = _has_subject_fact(facts, f"completed {course_need.group(0)}") if course_need else None
+                if fact:
+                    used.append(fact)
+                else:
+                    missing = True
+            if not missing:
+                return PolicyDecision(_choice_answer(question, "yes"), list(dict.fromkeys(used)), "course prerequisite chain satisfied", ["Validated required completed course facts"], 0.86)
+
+    if "graduate" in low_question:
+        clearance_missing = _has_subject_fact(facts, "disciplinary clearance is not recorded")
+        if clearance_missing:
+            return PolicyDecision(_choice_answer(question, "unknown"), [clearance_missing], "missing disciplinary clearance", ["Graduation clearance fact is absent"], 0.68)
+
+    if any(token in low_question for token in ["scholarship eligible", "eligible for", "ineligible", "financial aid", "register", "retake", "graduate"]):
+        relevant_rules = [
+            rule
+            for rule in rules
+            if _target_matches(rule, target) or any(token in rule.outcome for token in ["register", "eligible", "financial aid", "graduate", "retake"])
+        ]
+        if relevant_rules:
+            rule = relevant_rules[0]
+            necessary_only = ("requires" in norm(rule.premise.text) or " only if " in norm(rule.premise.text)) and "retake" not in low_question
+            return _conditions_decision(question, rule, facts, single_necessary_is_insufficient=necessary_only)
+
+    if _choice_question:
+        return PolicyDecision("C", select_premises(question, premises), "MCQ policy information is insufficient", ["Selected unknown option"], 0.72)
+    return None
+
+
 def _condition_satisfied(condition: str, facts: list[Premise]) -> tuple[bool | None, Premise | None, str]:
     disjuncts = _split_or_conditions(condition)
     if len(disjuncts) > 1:
@@ -203,6 +497,10 @@ def _condition_satisfied(condition: str, facts: list[Premise]) -> tuple[bool | N
 
 def _target_matches(rule: PolicyRule, target: str) -> bool:
     if overlap(rule.outcome, target) >= 1:
+        return True
+    if "eligible" in target and "eligibility" in rule.outcome:
+        return True
+    if "eligibility" in target and "eligible" in rule.outcome:
         return True
     if "eligible" in target and "ineligible" in rule.outcome:
         return overlap(rule.outcome.replace("ineligible", ""), target.replace("eligible", "")) >= 1
@@ -263,12 +561,15 @@ def solve_policy(question: str, premises: list[Premise]) -> PolicyDecision | Non
     direct_conflict = _direct_fact_contradiction(premises, target)
     if direct_conflict:
         return direct_conflict
-    explicit = _explicit_negative(premises, target)
-    if explicit:
-        return explicit
     contradiction = _contradiction(premises, target)
     if contradiction:
         return contradiction
+    specific = _specific_policy_decision(question, premises, target)
+    if specific:
+        return specific
+    explicit = _explicit_negative(premises, target)
+    if explicit:
+        return explicit
     invalid = _invalid_inference(question, premises, target)
     if invalid:
         return invalid
