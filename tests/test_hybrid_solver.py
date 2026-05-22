@@ -12,6 +12,10 @@ def test_hybrid_solver_proves_safe_universal_yes() -> None:
     assert result.answer == "yes"
     assert result.z3_status == "entailed"
     assert result.conclusion_fol == "bird(tweety)"
+    assert "P1 says" in result.explanation
+    assert "P2 says" in result.explanation
+    assert "Applying P1 to Tweety" in result.explanation
+    assert "Therefore the answer is yes" in result.explanation
 
 
 def test_hybrid_solver_proves_safe_universal_no() -> None:
@@ -21,6 +25,9 @@ def test_hybrid_solver_proves_safe_universal_no() -> None:
     )
     assert result.answer == "no"
     assert result.z3_status == "contradicted"
+    assert "Applying P1 to Tweety" in result.explanation
+    assert "rules out" in result.explanation
+    assert "Therefore the answer is no" in result.explanation
 
 
 def test_hybrid_solver_does_not_flip_required_condition() -> None:
@@ -33,7 +40,10 @@ def test_hybrid_solver_does_not_flip_required_condition() -> None:
     )
     assert result.answer == "unknown"
     assert result.z3_status == "not_entailed"
-    assert "required condition" in result.explanation
+    assert "P1 says" in result.explanation
+    assert "P2 says" in result.explanation
+    assert "opposite direction" in result.explanation
+    assert "answer is unknown" in result.explanation
 
 
 def test_router_hybrid_path_uses_z3_without_counting_model_call() -> None:

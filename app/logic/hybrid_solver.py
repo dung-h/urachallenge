@@ -27,6 +27,7 @@ class _Rule:
     consequent: str
     kind: Literal["implies", "implies_not"]
     direction: str = "sufficient"
+    text: str = ""
 
 
 @dataclass(frozen=True)
@@ -34,6 +35,7 @@ class _Fact:
     premise_id: str
     subject: str
     predicate: str
+    text: str = ""
 
 
 @dataclass(frozen=True)
@@ -82,6 +84,54 @@ def _subject(text: str) -> str:
     return "_".join(tokens)
 
 
+def _human_subject(subject: str) -> str:
+    parts = [part for part in subject.split("_") if part]
+    if not parts:
+        return "the subject"
+    return " ".join(part.upper() if len(part) == 1 else part.capitalize() for part in parts)
+
+
+def _human_predicate(predicate: str) -> str:
+    if predicate.startswith("eligible_"):
+        rest = predicate.removeprefix("eligible_").replace("_", " ").strip()
+        return f"eligible for the {rest}" if rest else "eligible"
+    if predicate.startswith("submit_"):
+        rest = predicate.removeprefix("submit_").replace("_", " ").strip()
+        return f"submitting a {rest}" if rest else "submitting the required item"
+    text = predicate.replace("_", " ").strip()
+    return text or "the queried property"
+
+
+def _claim_phrase(subject: str, predicate: str) -> str:
+    subject_text = _human_subject(subject)
+    predicate_text = _human_predicate(predicate)
+    if predicate.startswith("eligible_"):
+        return f"{subject_text} is {predicate_text}"
+    if predicate in {"bird", "mammal", "animal", "machine", "robot", "student", "teacher", "applicant"}:
+        return f"{subject_text} is a {predicate_text}"
+    return f"{subject_text} satisfies {predicate_text}"
+
+
+def _gerund_claim_phrase(subject: str, predicate: str) -> str:
+    subject_text = _human_subject(subject)
+    predicate_text = _human_predicate(predicate)
+    if predicate.startswith("eligible_"):
+        return f"{subject_text} being {predicate_text}"
+    return f"{subject_text} satisfying {predicate_text}"
+
+
+def _infinitive_claim_phrase(subject: str, predicate: str) -> str:
+    subject_text = _human_subject(subject)
+    predicate_text = _human_predicate(predicate)
+    if predicate.startswith("eligible_"):
+        return f"{subject_text} to be {predicate_text}"
+    return f"{subject_text} to satisfy {predicate_text}"
+
+
+def _premise_step(premise_id: str, text: str) -> str:
+    return f"{premise_id} says: {text}."
+
+
 def _parse_question(question: str) -> tuple[str, str] | None:
     text = _clean(question)
     match = re.match(r"^(?:is|are|does|do|did)\s+(.+?)\s+(.+)$", text, re.I)
@@ -107,6 +157,7 @@ def _parse_rule(premise_id: str, text: str) -> _Rule | None:
             consequent=_predicate(required.group(2)),
             kind="implies",
             direction="necessary_condition",
+            text=cleaned,
         )
 
     only_if = re.match(r"^(.+?)\s+only if\s+(.+)$", low)
@@ -117,6 +168,7 @@ def _parse_rule(premise_id: str, text: str) -> _Rule | None:
             consequent=_predicate(only_if.group(2)),
             kind="implies",
             direction="necessary_condition",
+            text=cleaned,
         )
 
     if_then = re.match(r"^if\s+(.+?),?\s+then\s+(.+)$", low)
@@ -126,6 +178,7 @@ def _parse_rule(premise_id: str, text: str) -> _Rule | None:
             antecedent=_predicate(if_then.group(1)),
             consequent=_predicate(if_then.group(2)),
             kind="implies",
+            text=cleaned,
         )
 
     all_are = re.match(r"^all\s+(.+?)\s+are\s+(.+)$", low)
@@ -135,6 +188,7 @@ def _parse_rule(premise_id: str, text: str) -> _Rule | None:
             antecedent=_predicate(all_are.group(1)),
             consequent=_predicate(all_are.group(2)),
             kind="implies",
+            text=cleaned,
         )
 
     no_are = re.match(r"^no\s+(.+?)\s+are\s+(.+)$", low)
@@ -144,6 +198,7 @@ def _parse_rule(premise_id: str, text: str) -> _Rule | None:
             antecedent=_predicate(no_are.group(1)),
             consequent=_predicate(no_are.group(2)),
             kind="implies_not",
+            text=cleaned,
         )
     return None
 
@@ -153,7 +208,12 @@ def _parse_fact(premise_id: str, text: str) -> _Fact | None:
     low = cleaned.lower()
     match = re.match(r"^([a-zA-Z][a-zA-Z0-9 _-]*?)\s+(?:is|are)\s+(?:a|an|the)?\s*(.+)$", low)
     if match:
-        return _Fact(premise_id=premise_id, subject=_subject(match.group(1)), predicate=_predicate(match.group(2)))
+        return _Fact(
+            premise_id=premise_id,
+            subject=_subject(match.group(1)),
+            predicate=_predicate(match.group(2)),
+            text=cleaned,
+        )
 
     match = re.match(r"^([a-zA-Z][a-zA-Z0-9 _-]*?)\s+(has|have|submitted|submits|meets|completed|paid|needs?|requires?)\s+(.+)$", low)
     if match:
@@ -161,8 +221,111 @@ def _parse_fact(premise_id: str, text: str) -> _Fact | None:
             premise_id=premise_id,
             subject=_subject(match.group(1)),
             predicate=_predicate(f"{match.group(2)} {match.group(3)}"),
+            text=cleaned,
         )
     return None
+
+
+def _find_direct_chain(
+    translated: _Translation,
+    query_subject: str,
+    query_predicate: str,
+    *,
+    negative: bool = False,
+) -> tuple[_Rule, _Fact] | None:
+    expected_kind = "implies_not" if negative else "implies"
+    for rule in translated.rules:
+        if rule.kind != expected_kind or rule.consequent != query_predicate:
+            continue
+        for fact in translated.facts:
+            if fact.subject == query_subject and fact.predicate == rule.antecedent:
+                return rule, fact
+    return None
+
+
+def _find_required_condition_gap(
+    translated: _Translation,
+    query_subject: str,
+    query_predicate: str,
+) -> tuple[_Rule, _Fact | None] | None:
+    for rule in translated.rules:
+        if rule.direction != "necessary_condition" or rule.antecedent != query_predicate:
+            continue
+        matching_fact = next(
+            (
+                fact
+                for fact in translated.facts
+                if fact.subject == query_subject and fact.predicate == rule.consequent
+            ),
+            None,
+        )
+        return rule, matching_fact
+    return None
+
+
+def _build_reasoning_explanation(
+    answer: str,
+    translated: _Translation,
+    query_subject: str,
+    query_predicate: str,
+) -> str:
+    subject = _human_subject(query_subject)
+    query_claim = _claim_phrase(query_subject, query_predicate)
+
+    if answer == "yes":
+        chain = _find_direct_chain(translated, query_subject, query_predicate)
+        if chain:
+            rule, fact = chain
+            return (
+                f"{_premise_step(rule.premise_id, rule.text)} "
+                f"{_premise_step(fact.premise_id, fact.text)} "
+                f"Applying {rule.premise_id} to {subject} gives that {query_claim}. "
+                "Therefore the answer is yes."
+            )
+
+    if answer == "no":
+        chain = _find_direct_chain(translated, query_subject, query_predicate, negative=True)
+        if chain:
+            rule, fact = chain
+            return (
+                f"{_premise_step(rule.premise_id, rule.text)} "
+                f"{_premise_step(fact.premise_id, fact.text)} "
+                f"Applying {rule.premise_id} to {subject} rules out that {query_claim}. "
+                "Therefore the answer is no."
+            )
+
+    if answer == "unknown":
+        gap = _find_required_condition_gap(translated, query_subject, query_predicate)
+        if gap:
+            rule, fact = gap
+            fact_text = f" {_premise_step(fact.premise_id, fact.text)}" if fact else ""
+            necessary_condition = _human_predicate(rule.consequent)
+            return (
+                f"{_premise_step(rule.premise_id, rule.text)}{fact_text} "
+                f"This means {_gerund_claim_phrase(query_subject, query_predicate)} would require {necessary_condition}, "
+                f"but it does not say that {necessary_condition} is enough for {_infinitive_claim_phrase(query_subject, query_predicate)}. "
+                "To answer yes, the premises would need a rule in that opposite direction. "
+                "No such rule is given, so the answer is unknown."
+            )
+
+    premise_steps = " ".join(_premise_step(rule.premise_id, rule.text) for rule in translated.rules)
+    premise_steps = " ".join(
+        step
+        for step in [
+            premise_steps,
+            " ".join(_premise_step(fact.premise_id, fact.text) for fact in translated.facts),
+        ]
+        if step
+    )
+    if answer == "unknown":
+        return (
+            f"{premise_steps} The premises do not provide a complete chain to prove or disprove "
+            f"that {query_claim}. Therefore the answer is unknown."
+        )
+    return (
+        f"{premise_steps} The supported premise chain determines that {query_claim}. "
+        f"Therefore the answer is {answer}."
+    )
 
 
 def _translate_premises(premises: list[str]) -> _Translation:
@@ -258,23 +421,17 @@ def _solve_with_z3(question: str, premises: list[str]) -> HybridResult:
         answer = "yes"
         status = "entailed"
         confidence = 0.86
-        explanation = "Hybrid solver translated safe premise patterns to Z3 and proved the queried claim."
+        explanation = _build_reasoning_explanation(answer, translated, query_subject, query_predicate)
     elif entails_no and not entails_yes:
         answer = "no"
         status = "contradicted"
         confidence = 0.86
-        explanation = "Hybrid solver translated safe premise patterns to Z3 and proved the queried claim is false."
+        explanation = _build_reasoning_explanation(answer, translated, query_subject, query_predicate)
     else:
         answer = "unknown"
         status = "not_entailed"
         confidence = 0.70
-        if any(rule.direction == "necessary_condition" for rule in translated.rules):
-            explanation = (
-                "Hybrid solver translated the required-condition premise in the safe direction and Z3 did not prove the target claim. "
-                "A required condition being satisfied is not enough to establish the conclusion."
-            )
-        else:
-            explanation = "Hybrid solver translated safe premise patterns to Z3, but the target claim was not entailed."
+        explanation = _build_reasoning_explanation(answer, translated, query_subject, query_predicate)
 
     used_ids = sorted({rule.premise_id for rule in translated.rules} | {fact.premise_id for fact in translated.facts})
     conclusion_fol = f"{query_predicate}({query_subject})"
