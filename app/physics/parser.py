@@ -72,7 +72,14 @@ def _composite_resistance(question: str) -> float | None:
 def _target(text: str) -> str | None:
     low = text.lower()
     resonance_context = "resonance" in low or "resonant" in low or "resonate" in low
-    if resonance_context and ("angular frequency" in low or "omega" in low or "ω" in text or "rad/s" in low):
+    if resonance_context and (
+        "angular frequency" in low
+        or "angular resonant frequency" in low
+        or "angular resonance frequency" in low
+        or "omega" in low
+        or "ω" in text
+        or "rad/s" in low
+    ):
         return "angular_frequency"
     if any(phrase in low for phrase in ["resonant frequency", "resonance frequency", "natural frequency", "oscillation frequency"]):
         return "frequency"
