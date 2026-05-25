@@ -167,6 +167,7 @@ def validate_explanation_rewrite(explanation: str, trace: ExplanationTrace | dic
         return False, ["empty_explanation"]
 
     normalized = _norm(rewritten)
+    solver_explanation = _norm(payload.get("solver_explanation") or "")
     answer = str(payload.get("answer") or "").strip()
     answer_hints = _answer_hints(answer)
     if answer_hints and not any(hint in normalized for hint in answer_hints):
@@ -180,6 +181,9 @@ def validate_explanation_rewrite(explanation: str, trace: ExplanationTrace | dic
         )
         if formula_hints and not any(hint in normalized for hint in formula_hints):
             errors.append("missing_formula_reference")
+        fol = _norm(payload.get("fol") or "")
+        if "perpendicular_bisector" in fol and "perpendicular" not in normalized:
+            errors.append("missing_geometry_reference:perpendicular")
     elif task_type == "logic":
         selected_ids = [str(pid).strip().upper() for pid in payload.get("selected_premise_ids") or [] if str(pid).strip()]
         if selected_ids:
@@ -190,6 +194,10 @@ def validate_explanation_rewrite(explanation: str, trace: ExplanationTrace | dic
             foreign_ids = sorted(present_ids - set(selected_ids))
             if foreign_ids:
                 errors.append("foreign_premise_ids:" + ",".join(foreign_ids))
+        proof_notes = " ".join(_norm(step.get("notes") or "") for step in payload.get("proof_steps") or [] if isinstance(step, dict))
+        for protected_phrase in ("missing faculty nomination condition", "existential witness"):
+            if (protected_phrase in proof_notes or protected_phrase in solver_explanation) and protected_phrase not in normalized:
+                errors.append("missing_solver_trace_phrase:" + protected_phrase)
 
     if answer.lower() == "yes" and re.search(r"\bno\b", normalized) and "yes" not in normalized:
         errors.append("answer_contradiction:no")

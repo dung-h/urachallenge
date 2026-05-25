@@ -36,6 +36,246 @@ def physics_explanation(formula: Formula, variables: dict[str, float], answer: f
             )
             + "."
         )
+    elif formula.formula_id == "electric_field_semicircular_arc_center":
+        parts.append("Geometry: uniformly charged semicircular arc at its center.")
+        parts.append(
+            "Extracted SI variables: "
+            + ", ".join(
+                [
+                    f"q={format_si(variables['q'], 'C')}",
+                    f"R={format_si(variables['R'], 'm')}",
+                ]
+            )
+            + "."
+        )
+    elif formula.formula_id == "electric_field_circular_arc_center":
+        parts.append("Geometry: uniformly charged circular arc at its center.")
+        parts.append(
+            "Extracted SI variables: "
+            + ", ".join(
+                [
+                    f"q={format_si(variables['q'], 'C')}",
+                    f"R={format_si(variables['R'], 'm')}",
+                    f"theta={variables['theta_rad']:.6g} rad",
+                ]
+            )
+            + "."
+        )
+    elif formula.formula_id == "electric_field_finite_line_perpendicular_bisector":
+        parts.append("Geometry: finite straight rod on the perpendicular bisector.")
+        parts.append(
+            "Extracted SI variables: "
+            + ", ".join(
+                [
+                    f"q={format_si(variables['q'], 'C')}",
+                    f"d={format_si(variables['d'], 'm')}",
+                    f"L={format_si(variables['L'], 'm')}",
+                ]
+            )
+            + "."
+        )
+    elif formula.formula_id == "electric_field_finite_line_axis_outside_center":
+        parts.append("Geometry: finite straight rod on its axis, outside the rod and measured from the center.")
+        parts.append(
+            "Extracted SI variables: "
+            + ", ".join(
+                [
+                    f"q={format_si(variables['q'], 'C')}",
+                    f"x={format_si(variables['x'], 'm')}",
+                    f"L={format_si(variables['L'], 'm')}",
+                ]
+            )
+            + "."
+        )
+    elif formula.formula_id == "electric_field_finite_line_axis_outside_end":
+        parts.append("Geometry: finite straight rod on its axis, measured from one end outside the rod.")
+        parts.append(
+            "Extracted SI variables: "
+            + ", ".join(
+                [
+                    f"q={format_si(variables['q'], 'C')}",
+                    f"d={format_si(variables['d'], 'm')}",
+                    f"L={format_si(variables['L'], 'm')}",
+                ]
+            )
+            + "."
+        )
+    elif formula.formula_id == "electric_field_symmetric_loop_center_zero":
+        parts.append("Geometry: symmetric closed loop at its center, so opposite contributions cancel by symmetry.")
+    elif formula.formula_id == "electric_potential_uniform_ring_center":
+        parts.append("Geometry: uniformly charged ring at its center.")
+        parts.append(
+            "Extracted SI variables: "
+            + ", ".join(
+                [
+                    f"q={format_si(variables['q'], 'C')}",
+                    f"R={format_si(variables['R'], 'm')}",
+                ]
+            )
+            + "."
+        )
+    elif formula.formula_id == "electric_potential_square_loop_center":
+        parts.append("Geometry: uniformly charged square wire loop at its center.")
+        parts.append(
+            "Extracted SI variables: "
+            + ", ".join(
+                [
+                    f"q={format_si(variables['q'], 'C')}",
+                    f"a={format_si(variables['a'], 'm')}",
+                ]
+            )
+            + "."
+        )
+    elif formula.formula_id == "electric_potential_uniform_ring_axis":
+        parts.append("Geometry: uniformly charged ring on its axis.")
+        parts.append(
+            "Extracted SI variables: "
+            + ", ".join(
+                [
+                    f"q={format_si(variables['q'], 'C')}",
+                    f"R={format_si(variables['R'], 'm')}",
+                    f"x={format_si(variables['x'], 'm')}",
+                ]
+            )
+            + "."
+        )
+    elif formula.formula_id == "electric_potential_uniform_disk_axis":
+        parts.append("Geometry: uniformly charged disk on its axis.")
+        parts.append(
+            "Extracted SI variables: "
+            + ", ".join(
+                [
+                    f"q={format_si(variables['q'], 'C')}",
+                    f"z={format_si(variables['z'], 'm')}",
+                    f"R={format_si(variables['R'], 'm')}",
+                ]
+            )
+            + "."
+        )
+    elif formula.formula_id == "electric_potential_finite_line_perpendicular_bisector":
+        parts.append("Geometry: finite straight rod potential at a point on the perpendicular bisector.")
+        parts.append(
+            "Extracted SI variables: "
+            + ", ".join(
+                [
+                    f"q={format_si(variables['q'], 'C')}",
+                    f"d={format_si(variables['d'], 'm')}",
+                    f"L={format_si(variables['L'], 'm')}",
+                ]
+            )
+            + "."
+        )
+    elif formula.formula_id == "electric_potential_finite_line_axis_outside_center":
+        parts.append("Geometry: finite straight rod potential on its axis outside the rod, measured from the center.")
+        parts.append(
+            "Extracted SI variables: "
+            + ", ".join(
+                [
+                    f"q={format_si(variables['q'], 'C')}",
+                    f"x={format_si(variables['x'], 'm')}",
+                    f"L={format_si(variables['L'], 'm')}",
+                ]
+            )
+            + "."
+        )
+    elif formula.formula_id == "electric_potential_finite_line_axis_outside_end":
+        parts.append("Geometry: finite straight rod potential on its axis outside the rod, measured from one end.")
+        parts.append(
+            "Extracted SI variables: "
+            + ", ".join(
+                [
+                    f"q={format_si(variables['q'], 'C')}",
+                    f"d={format_si(variables['d'], 'm')}",
+                    f"L={format_si(variables['L'], 'm')}",
+                ]
+            )
+            + "."
+        )
+    elif formula.formula_id == "electric_field_uniform_sphere_inside":
+        parts.append("Geometry: uniformly charged solid sphere, inside region.")
+        parts.append(
+            "Extracted SI variables: "
+            + ", ".join(
+                [
+                    f"q={format_si(variables['q'], 'C')}",
+                    f"r={format_si(variables['r'], 'm')}",
+                    f"R={format_si(variables['R'], 'm')}",
+                ]
+            )
+            + "."
+        )
+    elif formula.formula_id == "electric_field_uniform_sphere_outside":
+        parts.append("Geometry: uniformly charged solid sphere, outside region.")
+        parts.append(
+            "Extracted SI variables: "
+            + ", ".join(
+                [
+                    f"q={format_si(variables['q'], 'C')}",
+                    f"r={format_si(variables['r'], 'm')}",
+                ]
+            )
+            + "."
+        )
+    elif formula.formula_id == "electric_potential_uniform_sphere_shell_inside":
+        parts.append("Geometry: inside a uniformly charged thin spherical shell.")
+        parts.append(
+            "Extracted SI variables: "
+            + ", ".join(
+                [
+                    f"q={format_si(variables['q'], 'C')}",
+                    f"R={format_si(variables['R'], 'm')}",
+                ]
+            )
+            + "."
+        )
+    elif formula.formula_id == "electric_potential_uniform_sphere_shell_outside":
+        parts.append("Geometry: outside a uniformly charged thin spherical shell.")
+        parts.append(
+            "Extracted SI variables: "
+            + ", ".join(
+                [
+                    f"q={format_si(variables['q'], 'C')}",
+                    f"r={format_si(variables['r'], 'm')}",
+                ]
+            )
+            + "."
+        )
+    elif formula.formula_id == "magnetic_field_circular_loop_center":
+        parts.append("Geometry: circular current loop at its center.")
+        parts.append(
+            "Extracted SI variables: "
+            + ", ".join(
+                [
+                    f"I={format_si(variables['I'], 'A')}",
+                    f"R={format_si(variables['R'], 'm')}",
+                ]
+            )
+            + "."
+        )
+    elif formula.formula_id == "spherical_capacitor_capacitance":
+        parts.append("Geometry: spherical capacitor.")
+        parts.append(
+            "Extracted SI variables: "
+            + ", ".join(
+                [
+                    f"a={format_si(variables['a'], 'm')}",
+                    f"b={format_si(variables['b'], 'm')}",
+                ]
+            )
+            + "."
+        )
+    elif formula.formula_id == "electric_potential_circular_arc_center":
+        parts.append("Geometry: uniformly charged circular arc at its center.")
+        parts.append(
+            "Extracted SI variables: "
+            + ", ".join(
+                [
+                    f"q={format_si(variables['q'], 'C')}",
+                    f"R={format_si(variables['R'], 'm')}",
+                ]
+            )
+            + "."
+        )
     else:
         vals = ", ".join(f"{key}={value:.6g}" for key, value in variables.items())
         parts.append(f"Extracted SI variables: {vals}.")

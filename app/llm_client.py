@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Protocol
 import json
 import re
+import subprocess
 import time
 
 import httpx
@@ -21,6 +22,7 @@ class LLMClientNotConfigured(RuntimeError):
 
 ROLE_CONFIG = {
     "router_formatter": "Gemma 4 E2B-it",
+    "main_orchestrator": "Qwen3.5-4B",
     "reasoner": "DeepSeek-R1-Distill-Qwen-7B",
     "secondary_formatter": "Qwen3-4B",
 }
@@ -35,13 +37,15 @@ class LLMResult:
 
 
 class FallbackClient(Protocol):
+    def orchestrate(self, payload: dict[str, Any]) -> dict[str, Any] | None: ...
+
+    def plan_physics_action(self, payload: dict[str, Any]) -> dict[str, Any] | None: ...
+
+    def plan_logic_action(self, payload: dict[str, Any]) -> dict[str, Any] | None: ...
+
     def suggest_physics(self, question: str) -> dict[str, Any] | None: ...
 
-    def generate_physics_code(self, question: str) -> str | None: ...
-
     def suggest_logic(self, question: str, premises: list[str]) -> dict[str, Any] | None: ...
-
-    def answer_general(self, question: str) -> dict[str, Any] | None: ...
 
     def rewrite_explanation(self, trace: dict[str, Any]) -> str | None: ...
 
@@ -55,7 +59,7 @@ def load_prompts(path: Path = PROMPTS_PATH) -> dict[str, str]:
 
 class OpenAICompatibleLLMClient:
     def __init__(self, base_url: str | None = None, model: str = "local", timeout: float = 120.0, enabled: bool = False) -> None:
-        self.base_url = (base_url or "http://127.0.0.1:8080/v1").rstrip("/")
+        self.base_url = (base_url or "http://127.0.0.1:8001/v1").rstrip("/")
         self.model = model
         self.timeout = timeout
         self.enabled = enabled
@@ -151,38 +155,29 @@ class OpenAICompatibleLLMClient:
                     self.call_traces[-1]["json_validity"] = False
                     self.call_traces[-1]["repaired_json_validity"] = False
                     self.call_traces[-1]["json_parse_error"] = first_error
-                    self.call_traces[-1]["json_repair_error"] = str(repair_exc)
+                self.call_traces[-1]["json_repair_error"] = str(repair_exc)
                 return None
 
-    def suggest_physics(self, question: str) -> dict[str, Any] | None:
-        prompt = f"Question: {question}\nReturn JSON with target_quantity, formula_id, variables in SI units, and units."
-        return self._json_chat("physics_formula_assistant", prompt)
+    def orchestrate(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        return self._json_chat("main_orchestrator", json.dumps(payload, sort_keys=True), max_tokens=320)
 
-    def generate_physics_code(self, question: str) -> str | None:
-        """Generate Python code to solve a physics problem."""
-        prompt = f"Question: {question}"
-        result = self.chat("physics_code_generator", prompt, max_tokens=512, response_format=False)
-        if result.error or not result.content.strip():
-            return None
-        # Extract code from markdown fence
-        match = re.search(r"```(?:python)?\s*\n(.*?)\n```", result.content, re.S)
-        if match:
-            return match.group(1).strip()
-        # Fallback: return raw content if no fence
-        return result.content.strip()
+    def plan_physics_action(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        return self._json_chat("physics_agent_planner", json.dumps(payload, sort_keys=True), max_tokens=220)
+
+    def plan_logic_action(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        return self._json_chat("logic_agent_planner", json.dumps(payload, sort_keys=True), max_tokens=220)
+
+    def suggest_physics(self, question: str) -> dict[str, Any] | None:
+        prompt = (
+            f"Question: {question}\n"
+            "Return JSON with target_quantity, optional formula_id, optional expression, variables in SI units, and target_unit. "
+            "If you cannot name a known formula_id, return a single evaluable expression for the answer."
+        )
+        return self._json_chat("physics_formula_assistant", prompt)
 
     def suggest_logic(self, question: str, premises: list[str]) -> dict[str, Any] | None:
         prompt = "Premises:\n" + "\n".join(premises) + f"\nQuestion: {question}\nReturn JSON with answer, used_premise_ids, and reason_short."
         return self._json_chat("logic_reasoner", prompt)
-
-    def answer_general(self, question: str) -> dict[str, Any] | None:
-        prompt = (
-            "Question:\n"
-            f"{question}\n\n"
-            "Return JSON with keys answer, explanation, and optional confidence. "
-            "Use concise public reasoning only."
-        )
-        return self._json_chat("general_reasoner", prompt, max_tokens=256)
 
     def rewrite_explanation(self, trace: dict[str, Any]) -> str | None:
         result = self.chat("explanation_rewrite", json.dumps(trace, sort_keys=True), max_tokens=180, response_format=True)
@@ -201,6 +196,210 @@ class OpenAICompatibleLLMClient:
         if isinstance(obj, str) and obj.strip():
             return obj.strip()
         return content
+
+
+class OpenCodeCLIClient:
+    """Fallback worker that asks `opencode run` for JSON proposals.
+
+    OpenCode remains a proposal worker here: outputs are parsed as JSON and then
+    validated/recomputed by backend solvers before they can affect `/predict`.
+    """
+
+    def __init__(
+        self,
+        model: str = "ollama/llama3.2:3b",
+        timeout: float = 120.0,
+        enabled: bool = False,
+        project_dir: str | None = None,
+        command: str = "opencode",
+        agent: str | None = None,
+    ) -> None:
+        self.model = model if "/" in model else f"ollama/{model}"
+        self.timeout = timeout
+        self.enabled = enabled
+        self.project_dir = project_dir or str(ROOT)
+        self.command = command
+        self.agent = agent
+        self.prompts = load_prompts()
+        self.call_traces: list[dict[str, Any]] = []
+
+    @property
+    def base_url(self) -> str:
+        agent_part = f" --agent {self.agent}" if self.agent else ""
+        return f"opencode run{agent_part} --model {self.model}"
+
+    def chat(self, role: str, user: str, max_tokens: int = 256, response_format: bool = False) -> LLMResult:
+        if not self.enabled:
+            raise LLMClientNotConfigured("OpenCode fallback is disabled by default.")
+        system = self.prompts.get(role, self.prompts.get("default", "Answer concisely."))
+        prompt = (
+            f"System instruction:\n{system}\n\n"
+            f"User task:\n{user}\n\n"
+            "Return only the requested final content. Do not edit files or run commands."
+        )
+        if response_format:
+            prompt += "\nReturn valid JSON only."
+        cmd = [self.command, "run", "--model", self.model]
+        if self.agent:
+            cmd.extend(["--agent", self.agent])
+        cmd.extend(["--format", "json", "--dir", self.project_dir, prompt])
+        started = time.perf_counter()
+        trace: dict[str, Any] = {
+            "backend": "opencode_cli",
+            "model": self.model,
+            "agent": self.agent,
+            "role": role,
+            "max_tokens": max_tokens,
+            "response_format": "json_object" if response_format else None,
+            "system_prompt": system,
+            "user_prompt": user,
+            "command": " ".join(cmd[:7] + ["..."]),
+            "status": "started",
+        }
+        try:
+            completed = subprocess.run(
+                cmd,
+                cwd=self.project_dir,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout,
+                check=False,
+            )
+        except Exception as exc:
+            trace.update({"status": "error", "latency_ms": (time.perf_counter() - started) * 1000, "error": str(exc)})
+            self.call_traces.append(trace)
+            return LLMResult(content="", error=str(exc))
+
+        content = self._extract_text_from_events(completed.stdout)
+        stderr = completed.stderr.strip()
+        if completed.returncode != 0:
+            error = stderr or content or f"opencode exited with {completed.returncode}"
+            trace.update(
+                {
+                    "status": "error",
+                    "latency_ms": (time.perf_counter() - started) * 1000,
+                    "returncode": completed.returncode,
+                    "raw_response": content,
+                    "stderr": stderr[:1000],
+                    "error": error[:1000],
+                }
+            )
+            self.call_traces.append(trace)
+            return LLMResult(content=content, error=error)
+
+        trace.update(
+            {
+                "status": "ok",
+                "latency_ms": (time.perf_counter() - started) * 1000,
+                "raw_response": content,
+                "stderr": stderr[:1000],
+            }
+        )
+        self.call_traces.append(trace)
+        return LLMResult(content=content)
+
+    @staticmethod
+    def _extract_text_from_events(stdout: str) -> str:
+        parts: list[str] = []
+        for line in stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except Exception:
+                parts.append(line)
+                continue
+            part = event.get("part") if isinstance(event, dict) else None
+            if isinstance(part, dict) and part.get("type") == "text":
+                text = part.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "\n".join(part for part in parts if part).strip()
+
+    @staticmethod
+    def _json_objects_from_text(text: str) -> list[dict[str, Any]]:
+        decoder = json.JSONDecoder()
+        objects: list[dict[str, Any]] = []
+        for match in re.finditer(r"\{", text):
+            try:
+                parsed, _end = decoder.raw_decode(text[match.start() :])
+            except Exception:
+                continue
+            if isinstance(parsed, dict):
+                objects.append(parsed)
+        return objects
+
+    def _json_chat(self, role: str, user: str, max_tokens: int = 256) -> dict[str, Any] | None:
+        result = self.chat(role, user, max_tokens=max_tokens, response_format=True)
+        if result.error or not result.content.strip():
+            if self.call_traces:
+                self.call_traces[-1]["json_validity"] = False
+                self.call_traces[-1]["json_parse_error"] = result.error or "empty_response"
+            return None
+        try:
+            parsed = json.loads(result.content)
+            if self.call_traces:
+                self.call_traces[-1]["json_validity"] = True
+                self.call_traces[-1]["repaired_json_validity"] = False
+            return parsed
+        except Exception as exc:
+            first_error = str(exc)
+            candidates = self._json_objects_from_text(result.content)
+            if not candidates:
+                if self.call_traces:
+                    self.call_traces[-1]["json_validity"] = False
+                    self.call_traces[-1]["repaired_json_validity"] = False
+                    self.call_traces[-1]["json_parse_error"] = first_error
+                return None
+            try:
+                parsed = candidates[-1]
+                if self.call_traces:
+                    self.call_traces[-1]["json_validity"] = False
+                    self.call_traces[-1]["repaired_json_validity"] = True
+                return parsed
+            except Exception as repair_exc:
+                if self.call_traces:
+                    self.call_traces[-1]["json_validity"] = False
+                    self.call_traces[-1]["repaired_json_validity"] = False
+                    self.call_traces[-1]["json_parse_error"] = first_error
+                self.call_traces[-1]["json_repair_error"] = str(repair_exc)
+                return None
+
+    def orchestrate(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        return self._json_chat("main_orchestrator", json.dumps(payload, sort_keys=True), max_tokens=320)
+
+    def plan_physics_action(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        return self._json_chat("physics_agent_planner", json.dumps(payload, sort_keys=True), max_tokens=220)
+
+    def plan_logic_action(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        return self._json_chat("logic_agent_planner", json.dumps(payload, sort_keys=True), max_tokens=220)
+
+    def suggest_physics(self, question: str) -> dict[str, Any] | None:
+        prompt = (
+            f"Question: {question}\n"
+            "Return JSON with target_quantity, optional formula_id, optional expression, variables in SI units, and target_unit. "
+            "If you cannot name a known formula_id, return a single evaluable expression for the answer."
+        )
+        return self._json_chat("physics_formula_assistant", prompt)
+
+    def suggest_logic(self, question: str, premises: list[str]) -> dict[str, Any] | None:
+        prompt = "Premises:\n" + "\n".join(premises) + f"\nQuestion: {question}\nReturn JSON with answer, used_premise_ids, and reason_short."
+        return self._json_chat("logic_reasoner", prompt)
+
+    def rewrite_explanation(self, trace: dict[str, Any]) -> str | None:
+        result = self.chat("explanation_rewrite", json.dumps(trace, sort_keys=True), max_tokens=180, response_format=True)
+        if result.error or not result.content.strip():
+            return None
+        try:
+            obj = json.loads(result.content)
+        except Exception:
+            obj = None
+        if isinstance(obj, dict):
+            value = obj.get("explanation") or obj.get("text") or obj.get("content")
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return result.content.strip()
 
 
 class HuggingFaceLLMClient:
@@ -276,30 +475,64 @@ class HuggingFaceLLMClient:
             except Exception:
                 return None
 
-    def suggest_physics(self, question: str) -> dict[str, Any] | None:
-        prompt = f"Question: {question}\nReturn JSON with target_quantity, formula_id, variables in SI units, and units."
-        return self._json_generate(prompt, max_new_tokens=256)
-
-    def generate_physics_code(self, question: str) -> str | None:
-        prompt = f"Question: {question}\nGenerate Python code to solve the problem. Return only code in a Python code block if possible."
-        text = self._generate(prompt, max_new_tokens=512)
+    def orchestrate(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        prompt = self.prompts.get("main_orchestrator", self.prompts.get("default", "Answer concisely."))
+        text = self._generate(prompt + "\n\n" + json.dumps(payload, sort_keys=True), max_new_tokens=320)
         if not text.strip():
             return None
-        match = re.search(r"```(?:python)?\s*\n(.*?)\n```", text, re.S)
-        if match:
-            return match.group(1).strip()
-        return text.strip()
+        try:
+            return json.loads(text)
+        except Exception:
+            match = re.search(r"\{.*\}", text, re.S)
+            if not match:
+                return None
+            try:
+                return json.loads(match.group(0))
+            except Exception:
+                return None
+
+    def plan_physics_action(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        prompt = self.prompts.get("physics_agent_planner", self.prompts.get("default", "Answer concisely."))
+        text = self._generate(prompt + "\n\n" + json.dumps(payload, sort_keys=True), max_new_tokens=220)
+        if not text.strip():
+            return None
+        try:
+            return json.loads(text)
+        except Exception:
+            match = re.search(r"\{.*\}", text, re.S)
+            if not match:
+                return None
+            try:
+                return json.loads(match.group(0))
+            except Exception:
+                return None
+
+    def plan_logic_action(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        prompt = self.prompts.get("logic_agent_planner", self.prompts.get("default", "Answer concisely."))
+        text = self._generate(prompt + "\n\n" + json.dumps(payload, sort_keys=True), max_new_tokens=220)
+        if not text.strip():
+            return None
+        try:
+            return json.loads(text)
+        except Exception:
+            match = re.search(r"\{.*\}", text, re.S)
+            if not match:
+                return None
+            try:
+                return json.loads(match.group(0))
+            except Exception:
+                return None
+
+    def suggest_physics(self, question: str) -> dict[str, Any] | None:
+        prompt = (
+            f"Question: {question}\n"
+            "Return JSON with target_quantity, optional formula_id, optional expression, variables in SI units, and target_unit. "
+            "If you cannot name a known formula_id, return a single evaluable expression for the answer."
+        )
+        return self._json_generate(prompt, max_new_tokens=256)
 
     def suggest_logic(self, question: str, premises: list[str]) -> dict[str, Any] | None:
         prompt = "Premises:\n" + "\n".join(premises) + f"\nQuestion: {question}\nReturn JSON with answer, used_premise_ids, and reason_short."
-        return self._json_generate(prompt, max_new_tokens=256)
-
-    def answer_general(self, question: str) -> dict[str, Any] | None:
-        prompt = (
-            "Question:\n"
-            f"{question}\n\n"
-            "Return JSON with keys answer, explanation, and optional confidence. Use concise public reasoning only."
-        )
         return self._json_generate(prompt, max_new_tokens=256)
 
     def rewrite_explanation(self, trace: dict[str, Any]) -> str | None:

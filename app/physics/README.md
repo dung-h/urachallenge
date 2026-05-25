@@ -5,19 +5,16 @@ Core files (used by default):
 - formulas.py: formula registry and compute functions
 - formula_registry.py: qualitative lookup & helpers
 - parser.py: extraction of variables and units from text
+- problem_frame.py: lightweight frame inference for search/ranking guardrails
+- method_search.py: method/equation evidence retrieval and verification helpers
+- expression_eval.py: safe arithmetic evaluator for verified equation proposals
 - unit_converter.py: parse/format SI quantities
 - templates.py: explanation templates
 
-Experimental / optional (loaded conditionally):
-- v2/: structured v2 architecture with scenarios and qgraph (used when available)
-- llm_extractor.py / llm_extract_ollama.py: LLM-based extraction helpers (Ollama-specific helper exists)
-- llm_reasoning.py: LLM self-reasoning fallback for qualitative questions
-- rag_solver.py: retrieval-augmented routines for qualitative answers
-- search_solver.py / search_assisted_solver.py: search + LLM helpers
-- smart_extractor.py: geometry/structured extractor
-- multi_charge_solver.py: multi-charge specific solver
-- midpoint_solver.py: regex-based midpoint pattern solver
+Runtime boundaries:
+- LLM/search workers may propose formulas, expressions, or methods only when opt-in runtime settings allow them.
+- Final arithmetic and final JSON remain backend validated.
+- LLM-generated Python code execution is not part of the runtime path.
 
 Notes:
-- Experimental modules are imported inside `try` blocks and are **disabled by default** unless their dependencies (transformers, Ollama, search backends, etc.) are present.
-- If you want a cleanup action, I can either move these experimental files into `app/physics/experimental/` or add stubs. Which do you prefer?
+- `solver.py` is still intentionally the public entry point, but parser/search/verifier helpers should continue moving into focused modules instead of growing new special cases there.

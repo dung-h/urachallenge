@@ -18,8 +18,13 @@ env/
 htmlcov/
 
 # Runtime artifacts
+.env
+.env.*
+!.env.example
 logs/
 outputs/
+outputs/disagreements/
+outputs/traces/
 *.log
 *.tmp
 *.swp
@@ -45,6 +50,9 @@ docs/context/PROJECT_STATE.md
 docs/context/CURRENT_WORK.md
 
 reports/
+reports/disagreement_generation_report.md
+reports/phase*_*.md
+reports/*_report.md
 scripts/
 tests/
 datasets/
@@ -52,3 +60,11 @@ docs/
 # Challenge/private raw datasets
 datasets/exact/
 datasets/exact/official/
+
+# Ignore disagreement tooling and generated regression outputs outside the main runtime flow.
+!scripts/
+scripts/*
+!scripts/analysis/
+!scripts/analysis/**
+!tests/
+tests/*

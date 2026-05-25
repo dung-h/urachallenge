@@ -35,6 +35,7 @@ UNIT_TABLE: dict[str, tuple[str, float]] = {
     "μj": ("J", 1e-6),
     "nj": ("J", 1e-9),
     "c": ("C", 1.0),
+    "microc": ("C", 1e-6),
     "mc": ("C", 1e-3),
     "uc": ("C", 1e-6),
     "μc": ("C", 1e-6),
@@ -91,6 +92,16 @@ def gold_unit(row: dict[str, Any]) -> str | None:
     return row.get("gold_unit") or row.get("unit")
 
 
+def _resolve_unit(unit_text: Any) -> tuple[str | None, float | None]:
+    value = str(unit_text or "").replace("µ", "μ").replace("Ω", "Ω").strip()
+    if not value:
+        return None, None
+    key = value.lower()
+    if value in {"Ω", "ω"}:
+        key = "ω"
+    return UNIT_TABLE.get(key, (None, None))
+
+
 def _extract_value_unit(text: Any) -> tuple[float | None, str | None]:
     value = str(text or "").replace("µ", "μ").replace("Ω", "Ω")
     match = re.search(r"([-+]?\d*\.?\d+(?:e[-+]?\d+)?)\s*([a-zA-ZμΩ/%]+(?:/[a-zA-Z]+)?|%)?", value, re.I)
@@ -98,12 +109,9 @@ def _extract_value_unit(text: Any) -> tuple[float | None, str | None]:
         return None, None
     number = float(match.group(1))
     raw_unit = (match.group(2) or "").strip()
-    key = raw_unit.lower()
-    if raw_unit in {"Ω", "ω"}:
-        key = "ω"
-    if key not in UNIT_TABLE:
+    base_unit, factor = _resolve_unit(raw_unit)
+    if base_unit is None:
         return number, raw_unit or None
-    base_unit, factor = UNIT_TABLE[key]
     return number * factor, base_unit
 
 
@@ -114,12 +122,14 @@ def _score_physics(row: dict[str, Any], response: QAResponse) -> tuple[bool, boo
     actual_value, actual_unit = _extract_value_unit(response.answer)
     expected_value, expected_unit_from_answer = _extract_value_unit(expected)
     expected_unit = gold_unit(row) or expected_unit_from_answer
+    expected_base_unit = None
+    if expected_unit:
+        expected_base_unit, expected_factor = _resolve_unit(expected_unit)
+        if expected_base_unit is not None and expected_value is not None and expected_factor is not None:
+            expected_value *= expected_factor
     if expected_value is None:
         answer_correct = normalize_answer_label(response.answer) == normalize_answer_label(expected)
         return answer_correct, None, None
-    expected_base_unit = None
-    if expected_unit:
-        _, expected_base_unit = _extract_value_unit(f"1 {expected_unit}")
     tolerance = float(row.get("tolerance") or max(1e-6, abs(expected_value) * 1e-3))
     numeric_correct = actual_value is not None and math.isclose(actual_value, expected_value, rel_tol=1e-3, abs_tol=tolerance)
     unit_correct = True if not expected_base_unit else actual_unit == expected_base_unit

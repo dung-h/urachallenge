@@ -1,27 +1,33 @@
 from __future__ import annotations
 
 import json
-import logging
-import os
-import re
 import time
 import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Response
 from fastapi.responses import HTMLResponse
 
-from app.guardrails import guardrail_prompt_text
 from app.logic.premise_selector import normalize_premises
 from app.logic.solver import solve as solve_logic
 from app.logic.proof_trace import proof_steps_to_dicts, validate_proof_steps
-from app.explanation_worker import build_explanation_trace, validate_explanation_rewrite
 # NOTE: hybrid_solver is optional (depends on extra packages like z3). We import it lazily.
-from app.llm_client import FallbackClient, OpenAICompatibleLLMClient, HuggingFaceLLMClient
-from app.physics.solver import solve as solve_physics, solve_from_llm_suggestion, solve_from_llm_code
+from app.llm_client import FallbackClient
+from app.physics.solver import solve as solve_physics
 from app.pipeline_config import PipelineConfig, load_pipeline_config
+from app.runtime_workflow import InputNormalizer, LLMOrchestrator, NormalizedRequest, TaskRouter, build_runtime_trace
+from app.runtime_clients import ensure_runtime_llm_client
+from app.runtime_trace import (
+    attach_llm_trace,
+    apply_input_guardrail_confidence,
+    ensure_public_cot,
+    log_request,
+    maybe_rewrite_explanation,
+    physics_search_used,
+    safe_trace_file,
+    write_trace as write_runtime_trace,
+)
 from app.schemas import QARequest, QAResponse, TaskType
 
 
@@ -32,438 +38,16 @@ TRACE_DIR = ROOT / "outputs" / "traces" / "production_like"
 # Bumped manually when the /demo UI changes, to make cache/debug obvious.
 DEMO_BUILD_ID = "2026-05-21b"
 
-logger = logging.getLogger("ura")
-uvicorn_logger = logging.getLogger("uvicorn.error")
-
-
-PHYSICS_HINTS = {
-    "voltage", "current", "resistance", "resistor", "ohm", "power", "capacitor", "capacitance",
-    "charge", "electric field", "force", "joule", "watt", "microfarad", "coulomb",
-    "lc circuit", "rlc", "inductance", "inductor", "mh", "uf", "frequency", "angular frequency",
-    "rad/s", "resonant", "resonance",
-}
-
-
-def _looks_like_logic_prompt(text: str) -> bool:
-    low = text.lower()
-    return bool(
-        re.search(r"\bif\b.+\bthen\b", low, re.S)
-        or "based only on the rules" in low
-        or "rules state" in low
-        or re.search(r"(?m)^\s*(?:all|no|some)\b", text, re.I)
-        or re.search(r"(?m)^\s*(?:does|is|are|must)\b.+\?\s*$", text, re.I)
-        or re.search(r"\b[A-E]\)\s+", text)
-    )
-
-
 def route_task(request: QARequest) -> TaskType:
-    guarded_question = guardrail_prompt_text(request.question).normalized_text
-    if request.task_type == TaskType.physics and _looks_like_logic_prompt(guarded_question):
-        return TaskType.logic
-    if request.task_type != TaskType.auto:
-        return request.task_type
-    if request.premises:
-        return TaskType.logic
-    low = guarded_question.lower()
-    if _looks_like_logic_prompt(guarded_question):
-        return TaskType.logic
-    if any(hint in low for hint in PHYSICS_HINTS) or re.search(r"\b[0-9.]+\s*(v|a|ohm|ω|w|f|c|j|n)\b", low):
-        return TaskType.physics
-    return TaskType.logic
-
-
-def _strip_wrapping_quotes(text: str) -> str:
-    return text.strip().strip("\"'“”‘’").strip()
-
-
-def _strip_logic_line_prefix(text: str) -> tuple[str, str | None]:
-    match = re.match(r"^(rule|premise|fact|observation|question)\s*:\s*(.*)$", text, flags=re.I)
-    if not match:
-        return text, None
-    return match.group(2).strip(), match.group(1).lower()
-
-
-def _looks_like_rule_premise_line(text: str) -> bool:
-    return bool(re.match(r"^(?:if\b.+\bthen\b|all\b|no\b|some\b)", text, flags=re.I))
-
-
-def _looks_like_fact_premise_line(text: str) -> bool:
-    low = text.lower().rstrip(".")
-    if low.endswith("?"):
-        return False
-    return bool(
-        re.match(r"^.+?\s+(?:is|are)\s+(?:a |an )?.+$", low)
-        or re.match(r"^.+?\s+(?:studies|registers|rings|fails|turns on|receives .+|has .+|can .+)$", low)
-    )
-
-
-def _looks_like_question_line(text: str) -> bool:
-    return bool(re.match(r"^(?:does|is|are|did|must|which|what)\b.+\?\s*$", text, flags=re.I))
-
-
-def _extract_embedded_logic(question: str, premises: list[str], choices: list[str]) -> tuple[str, list[str], list[str]]:
-    if premises:
-        return question, premises, choices
-
-    extracted_premises: list[str] = []
-    extracted_choices = list(choices)
-    had_choices = bool(choices)
-    question_lines: list[str] = []
-    choice_lines: list[str] = []
-    collecting_unlabeled_choices = False
-
-    for raw_line in question.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        clean_line = _strip_wrapping_quotes(line)
-        clean_line, prefix = _strip_logic_line_prefix(clean_line)
-        if not clean_line:
-            continue
-        line_low = clean_line.lower()
-        if prefix == "question":
-            question_lines.append(clean_line)
-            continue
-        if prefix in {"rule", "premise", "fact", "observation"}:
-            extracted_premises.append(clean_line.rstrip("."))
-            continue
-        if _looks_like_question_line(clean_line):
-            question_lines.append(clean_line)
-            continue
-        if "which of the following" in line_low:
-            collecting_unlabeled_choices = True
-            question_lines.append(clean_line)
-            continue
-        numbered_match = re.match(r"^\d+[\.)]\s*(.+)$", clean_line)
-        if numbered_match:
-            candidate = _strip_wrapping_quotes(numbered_match.group(1)).rstrip(".")
-            if candidate.endswith("?"):
-                question_lines.append(candidate)
-            elif collecting_unlabeled_choices and not had_choices:
-                extracted_choices.append(candidate)
-                choice_lines.append(f"{chr(ord('A') + len(extracted_choices) - 1)}) {candidate}")
-            else:
-                extracted_premises.append(candidate)
-            continue
-        choice_match = re.match(r"^([A-E])\)\s*(.+)$", clean_line, re.I)
-        if choice_match:
-            if not had_choices:
-                extracted_choices.append(choice_match.group(2).strip())
-                choice_lines.append(f"{choice_match.group(1).upper()}) {choice_match.group(2).strip()}")
-            continue
-        if collecting_unlabeled_choices and not had_choices and re.match(r"^if\b", clean_line, re.I):
-            extracted_choices.append(clean_line)
-            choice_lines.append(f"{chr(ord('A') + len(extracted_choices) - 1)}) {clean_line}")
-            continue
-        if (
-            _looks_like_rule_premise_line(clean_line)
-            or re.search(r"\bobserved\b.+\bfailed\b", clean_line, re.I)
-            or (extracted_premises and _looks_like_fact_premise_line(clean_line))
-        ):
-            extracted_premises.append(clean_line.rstrip("."))
-            continue
-        question_lines.append(clean_line)
-
-    if not extracted_premises:
-        return question, premises, choices
-
-    compact_question = " ".join(question_lines)
-    if choice_lines:
-        compact_question = " ".join([compact_question, *choice_lines]).strip()
-    return compact_question or question, extracted_premises, extracted_choices
-
-
-def _runtime_llm_client(config: PipelineConfig, enabled: bool) -> OpenAICompatibleLLMClient:
-    backend = (os.environ.get("URA_LLM_BACKEND") or os.environ.get("URA_LLM_BACKEND_TYPE") or "").lower()
-    # Backends: openai-compatible (default), ollama (via openai-compatible endpoint), huggingface
-    if backend in {"huggingface", "hf"} or os.environ.get("URA_USE_HF") == "1":
-        model = os.environ.get("URA_HF_MODEL") or os.environ.get("URA_LLM_MODEL") or config.reasoner_model
-        timeout = float(os.environ.get("URA_LLM_TIMEOUT", "120"))
-        return HuggingFaceLLMClient(model=model, timeout=timeout, enabled=enabled)
-    base_url = os.environ.get("URA_LLM_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
-    if backend == "ollama":
-        base_url = base_url or "http://127.0.0.1:11434/v1"
-        if not base_url.rstrip("/").endswith("/v1"):
-            base_url = base_url.rstrip("/") + "/v1"
-    else:
-        base_url = base_url or "http://127.0.0.1:8080/v1"
-    model = os.environ.get("URA_LLM_MODEL") or config.reasoner_model
-    timeout = float(os.environ.get("URA_LLM_TIMEOUT", "120"))
-    return OpenAICompatibleLLMClient(base_url=base_url, model=model, timeout=timeout, enabled=enabled)
-
-
-def _ensure_llm_client(
-    config: PipelineConfig,
-    llm_client: FallbackClient | None,
-    enabled: bool,
-) -> FallbackClient | None:
-    if llm_client is not None:
-        return llm_client
-    if not enabled:
-        return None
-    return _runtime_llm_client(config, enabled=True)
-
-
-def _llm_client_info(llm_client: FallbackClient | None) -> dict[str, Any]:
-    if llm_client is None:
-        return {"enabled": False}
-    return {
-        "enabled": True,
-        "client_type": type(llm_client).__name__,
-        "model": getattr(llm_client, "model", None),
-        "base_url": getattr(llm_client, "base_url", None),
-    }
-
-
-def _attach_llm_trace(metadata: dict[str, Any], llm_client: FallbackClient | None) -> None:
-    traces = getattr(llm_client, "call_traces", None)
-    metadata["llm_trace"] = list(traces) if isinstance(traces, list) else []
-    metadata["llm_client"] = _llm_client_info(llm_client)
-
-
-def _general_fallback_response(
-    question: str,
-    llm_client: FallbackClient | None,
-    metadata: dict[str, Any],
-) -> QAResponse | None:
-    if not llm_client:
-        metadata["fallback_rejected_reason"] = "general_fallback_no_llm_client"
-        return None
-    try:
-        suggestion = llm_client.answer_general(question)
-        metadata["model_calls"] = int(metadata.get("model_calls", 0)) + 1
-    except Exception as exc:
-        metadata["fallback_rejected_reason"] = f"general_fallback_error:{type(exc).__name__}"
-        return None
-    if not isinstance(suggestion, dict):
-        metadata["fallback_rejected_reason"] = "general_fallback_no_json"
-        return None
-
-    answer = str(suggestion.get("answer") or "").strip()
-    explanation = str(suggestion.get("explanation") or suggestion.get("reason_short") or "").strip()
-    if not answer or not explanation:
-        metadata["fallback_rejected_reason"] = "general_fallback_missing_answer_or_explanation"
-        return None
-    if len(answer) > 2000 or len(explanation) > 4000:
-        metadata["fallback_rejected_reason"] = "general_fallback_too_long"
-        return None
-
-    try:
-        confidence = float(suggestion.get("confidence", 0.60))
-    except Exception:
-        confidence = 0.60
-    confidence = max(0.30, min(0.65, confidence))
-    metadata["fallback_used"] = True
-    metadata["fallback_accepted"] = True
-    metadata["solver_used"] = "validated_general_llm_fallback"
-    return QAResponse(
-        answer=answer,
-        explanation=explanation,
-        premises=[],
-        cot=[
-            "Deterministic solver could not reduce the question to supported premises or formulas.",
-            "General local LLM fallback produced a structured answer.",
-            "Backend validated required answer/explanation fields before returning JSON.",
-        ],
-        fol=None,
-        confidence=confidence,
-        task_type="unknown",
-        raw_json_validity=True,
-        repaired_json_validity=None,
-    )
-
-
-def _maybe_rewrite_explanation(
-    request: QARequest,
-    response: QAResponse,
-    config: PipelineConfig,
-    llm_client: FallbackClient | None,
-    metadata: dict[str, Any],
-) -> QAResponse:
-    if not config.enable_llm_explanation or not llm_client:
-        return response
-    normalized_request_premises = normalize_premises(request.premises)
-    premise_lookup = {premise.id: premise.text for premise in normalized_request_premises}
-    selected_premise_texts = [premise_lookup.get(premise_id, "") for premise_id in response.premises]
-    trace = build_explanation_trace(
-        request_id=str(metadata.get("request_id") or ""),
-        question=request.question,
-        task_type=response.task_type,
-        answer=response.answer,
-        explanation=response.explanation,
-        fol=response.fol,
-        selected_premise_ids=list(response.premises),
-        selected_premise_texts=selected_premise_texts,
-        cot=list(response.cot),
-        proof_steps=metadata.get("proof_steps", []),
-        physics_variables=dict(metadata.get("physics_variables") or {}),
-        solver_used=str(metadata.get("solver_used") or ""),
-        confidence=float(response.confidence),
-    )
-    metadata["explanation_trace"] = trace.to_payload()
-    try:
-        rewritten = llm_client.rewrite_explanation(trace.to_payload())
-        metadata["model_calls"] = int(metadata.get("model_calls", 0)) + 1
-    except Exception as exc:
-        metadata["model_calls"] = int(metadata.get("model_calls", 0)) + 1
-        metadata["explanation_rewrite_rejected"] = True
-        metadata["fallback_rejected_reason"] = f"explanation_rewrite_error:{type(exc).__name__}"
-        return response
-    if rewritten:
-        ok, validation_errors = validate_explanation_rewrite(rewritten, trace)
-        metadata["explanation_rewrite_validation_errors"] = validation_errors
-    else:
-        ok = False
-        metadata["explanation_rewrite_validation_errors"] = ["empty_explanation"]
-    if ok:
-        metadata["explanation_rewrite_accepted"] = True
-        return response.model_copy(update={"explanation": rewritten})
-    metadata["explanation_rewrite_rejected"] = True
-    metadata["fallback_rejected_reason"] = "explanation_rewrite_validation_failed"
-    return response
-
-
-def _clean_public_steps(steps: list[str]) -> list[str]:
-    cleaned: list[str] = []
-    seen: set[str] = set()
-    for step in steps:
-        text = re.sub(r"\s+", " ", str(step or "").strip())
-        if not text:
-            continue
-        key = text.lower()
-        if key in seen:
-            continue
-        cleaned.append(text)
-        seen.add(key)
-    return cleaned
-
-
-def _apply_input_guardrail_confidence(response: QAResponse, guardrail: Any) -> QAResponse:
-    if not getattr(guardrail, "noise_detected", False):
-        return response
-    if response.answer == "unknown":
-        return response
-    return response.model_copy(update={"confidence": min(float(response.confidence), 0.85)})
-
-
-def _ensure_public_cot(response: QAResponse, metadata: dict[str, Any]) -> QAResponse:
-    """Ensure every API answer has concise public solution steps.
-
-    This is not hidden chain-of-thought. It is a backend-rendered trace summary
-    from solver metadata, formula/rule id, explanation, and final answer.
-    """
-
-    steps = _clean_public_steps(response.cot)
-    original_steps = list(steps)
-
-    if response.task_type == "physics":
-        if response.fol and not any(response.fol in step for step in steps):
-            steps.append(f"Selected physics rule/formula: {response.fol}")
-        if response.answer != "unknown" and not any("answer" in step.lower() for step in steps):
-            steps.append(f"Computed final answer: {response.answer}")
-    elif response.task_type == "logic":
-        if response.premises and not any("premise" in step.lower() for step in steps):
-            steps.append(f"Selected premises: {', '.join(response.premises)}")
-        if response.answer != "unknown" and not any("answer" in step.lower() for step in steps):
-            steps.append(f"Derived final answer: {response.answer}")
-    elif response.answer != "unknown" and not steps:
-        steps.append(f"Produced final answer: {response.answer}")
-
-    if not steps and response.explanation:
-        steps.append(f"Explanation summary: {response.explanation}")
-    if not steps:
-        steps.append("No supported answer could be derived from the available solver trace.")
-
-    steps = _clean_public_steps(steps)
-    if steps != original_steps:
-        metadata["cot_finalized"] = True
-    return response.model_copy(update={"cot": steps})
-
-
-def _confidence_factors(task: TaskType, response: QAResponse, metadata: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "solver_success": response.answer != "unknown",
-        "formula_matched": bool(response.fol) if task == TaskType.physics else None,
-        "premise_ids_present": bool(response.premises) if task == TaskType.logic else None,
-        "input_noise_detected": bool(metadata.get("input_guardrail_noise_detected", False)),
-        "input_guardrail_applied": metadata.get("input_question_original") != metadata.get("input_question_normalized"),
-        "fallback_used": bool(metadata.get("fallback_used")),
-        "fallback_accepted": bool(metadata.get("fallback_accepted")),
-        "final_json_validated": True,
-    }
-
-
-def _write_trace(request: QARequest, response: QAResponse, metadata: dict[str, Any]) -> None:
-    TRACE_DIR.mkdir(parents=True, exist_ok=True)
-    request_id = metadata["request_id"]
-    trace = {
-        "request_id": request_id,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "task_type": response.task_type,
-        "solver_used": metadata.get("solver_used"),
-        "input_question_original": metadata.get("input_question_original"),
-        "input_question_normalized": metadata.get("input_question_normalized"),
-        "input_guardrail_noise_detected": metadata.get("input_guardrail_noise_detected", False),
-        "input_guardrail_noise_markers": metadata.get("input_guardrail_noise_markers", []),
-        "input_guardrail_removed_segments": metadata.get("input_guardrail_removed_segments", []),
-        "formula_id": response.fol,
-        "selected_premises": response.premises,
-        "confidence": response.confidence,
-        "confidence_factors": _confidence_factors(TaskType(response.task_type) if response.task_type in {"physics", "logic"} else TaskType.auto, response, metadata),
-        "proof_steps": metadata.get("proof_steps", []),
-        "proof_step_validity": metadata.get("proof_step_validity"),
-        "proof_step_errors": metadata.get("proof_step_errors", []),
-        "explanation_trace": metadata.get("explanation_trace"),
-        "explanation_rewrite_accepted": metadata.get("explanation_rewrite_accepted", False),
-        "explanation_rewrite_rejected": metadata.get("explanation_rewrite_rejected", False),
-        "explanation_rewrite_validation_errors": metadata.get("explanation_rewrite_validation_errors", []),
-        "fallback_used": metadata.get("fallback_used", False),
-        "fallback_accepted": metadata.get("fallback_accepted", False),
-        "fallback_rejected_reason": metadata.get("fallback_rejected_reason"),
-        "model_calls": metadata.get("model_calls", 0),
-        "llm_client": metadata.get("llm_client", {"enabled": False}),
-        "llm_trace": metadata.get("llm_trace", []),
-        "latency_ms": metadata.get("latency_ms", 0.0),
-        "answer": response.answer,
-        "explanation": response.explanation,
-        "cot": response.cot,
-        "raw_json_validity": response.raw_json_validity,
-        "repaired_json_validity": response.repaired_json_validity,
-    }
-    (TRACE_DIR / f"{request_id}.json").write_text(json.dumps(trace, indent=2, sort_keys=True) + "\n")
-
-
-def _log_request(task: TaskType, request_id: str, metadata: dict[str, Any]) -> None:
-    msg = (
-        "predict request_id=%s task=%s solver=%s model_calls=%s fallback_used=%s latency_ms=%.1f"
-    )
-    args = (
-        request_id,
-        task.value,
-        metadata.get("solver_used"),
-        metadata.get("model_calls", 0),
-        metadata.get("fallback_used", False),
-        float(metadata.get("latency_ms", 0.0) or 0.0),
-    )
-    logger.info(msg, *args)
-    # Ensure visibility under uvicorn default logging config.
-    uvicorn_logger.info(msg, *args)
-
-
-def _safe_trace_file(request_id: str) -> Path:
-    # Prevent path traversal; request_id is normally a UUID we generate.
-    if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", request_id):
-        raise HTTPException(status_code=404, detail="trace_not_found")
-    candidate = (TRACE_DIR / f"{request_id}.json").resolve()
-    trace_root = TRACE_DIR.resolve()
-    if trace_root not in candidate.parents:
-        raise HTTPException(status_code=404, detail="trace_not_found")
-    return candidate
+    return TaskRouter().route(InputNormalizer().normalize(request))
 
 
 @router.get("/trace/{request_id}")
 def trace(request_id: str) -> dict[str, Any]:
-    path = _safe_trace_file(request_id)
+    try:
+        path = safe_trace_file(TRACE_DIR, request_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     if not path.exists():
         raise HTTPException(status_code=404, detail="trace_not_found")
     try:
@@ -480,81 +64,81 @@ def predict_with_metadata(
 ) -> tuple[QAResponse, dict[str, Any]]:
     start = time.perf_counter()
     config = config or load_pipeline_config()
-    guardrail = guardrail_prompt_text(request.question)
+    normalizer = InputNormalizer()
+    task_router = TaskRouter()
+    normalized = normalizer.normalize(request)
+    guarded_request = normalized.as_qa_request()
+    guardrail = normalized.guardrail
     metadata: dict[str, Any] = {
         "request_id": request.request_id or str(uuid.uuid4()),
         "input_question_original": guardrail.original_text,
         "input_question_normalized": guardrail.normalized_text,
+        "normalized_question": normalized.question,
+        "normalized_premise_count": len(normalized.premises),
+        "normalized_choice_count": len(normalized.choices),
+        "normalization_warnings": list(normalized.warnings),
         "input_guardrail_noise_detected": guardrail.noise_detected,
         "input_guardrail_noise_markers": list(guardrail.noise_markers),
         "input_guardrail_removed_segments": list(guardrail.removed_segments),
         "fallback_used": False,
         "fallback_accepted": False,
         "fallback_rejected_reason": None,
-        "fallback_policy": "deterministic_default",
+        "fallback_policy": "always_on",
         "model_calls": 0,
         "explanation_rewrite_rejected": False,
         "solver_used": "deterministic",
     }
-    allow_fallback = bool(request.allow_llm_fallback or config.enable_llm_fallback)
-    if allow_fallback:
-        metadata["fallback_policy"] = "opt_in_or_config"
-    llm_client = _ensure_llm_client(config, llm_client, allow_fallback or config.enable_llm_explanation)
-    metadata["llm_client"] = _llm_client_info(llm_client)
-    working_request = request.model_copy(update={"question": guardrail.normalized_text})
-    task = route_task(request)
-    routed_question = guardrail.normalized_text
+    persist_trace = write_trace
+    llm_client = ensure_runtime_llm_client(config, llm_client, True)
+    from app.runtime_clients import llm_client_info
+
+    metadata["llm_client"] = llm_client_info(llm_client)
+    planner_trace_before = len(getattr(llm_client, "call_traces", []) or []) if llm_client is not None else 0
+    orchestration_plan = LLMOrchestrator().plan(normalized, llm_client)
+    planner_trace_after = len(getattr(llm_client, "call_traces", []) or []) if llm_client is not None else 0
+    if planner_trace_after > planner_trace_before:
+        metadata["model_calls"] += planner_trace_after - planner_trace_before
+    metadata["orchestration_plan"] = orchestration_plan.as_dict()
+    working_request = guarded_request
+    heuristic_task = task_router.route(normalized)
+    task = orchestration_plan.task_enum() or heuristic_task
+    if (
+        orchestration_plan.source == "llm"
+        and orchestration_plan.confidence < 0.5
+        and orchestration_plan.task_enum() is not None
+        and orchestration_plan.task_enum() != heuristic_task
+    ):
+        task = heuristic_task
+    routed_question = normalized.question
     if task == TaskType.physics:
         result = solve_physics(
             routed_question,
-            use_llm_extraction=allow_fallback,
-            use_search=allow_fallback,
+            use_llm_extraction=True,
+            use_search=True,
+            llm_client=llm_client,
         )
-        if allow_fallback and llm_client and (not result.success or result.confidence < config.fallback_confidence_threshold):
-            # Try formula suggestion first
-            try:
-                suggestion = llm_client.suggest_physics(routed_question)
-                metadata["model_calls"] += 1
-            except Exception as exc:
-                suggestion = None
-                metadata["model_calls"] += 1
-                metadata["fallback_rejected_reason"] = f"physics_fallback_error:{type(exc).__name__}"
-            if suggestion:
-                fallback_result = solve_from_llm_suggestion(routed_question, suggestion)
-                if fallback_result.success:
-                    result = fallback_result
-                    metadata["fallback_used"] = True
-                    metadata["fallback_accepted"] = True
-                    metadata["solver_used"] = "deterministic_with_validated_llm_proposal"
-                else:
-                    metadata["fallback_rejected_reason"] = fallback_result.error or "physics_fallback_validation_failed"
-            
-            # If formula suggestion failed, try code generation
-            if not result.success or result.confidence < config.fallback_confidence_threshold:
-                try:
-                    code = llm_client.generate_physics_code(routed_question)
-                    metadata["model_calls"] += 1
-                except Exception as exc:
-                    code = None
-                    metadata["model_calls"] += 1
-                    if metadata.get("fallback_rejected_reason") is None:
-                        metadata["fallback_rejected_reason"] = f"physics_code_gen_error:{type(exc).__name__}"
-                
-                if code:
-                    code_result = solve_from_llm_code(routed_question, code)
-                    if code_result.success:
-                        result = code_result
-                        metadata["fallback_used"] = True
-                        metadata["fallback_accepted"] = True
-                        metadata["solver_used"] = "llm_code_generation"
-                    else:
-                        if metadata.get("fallback_rejected_reason") is None:
-                            metadata["fallback_rejected_reason"] = code_result.error or "physics_code_gen_validation_failed"
-                elif metadata.get("fallback_rejected_reason") is None:
-                    metadata["fallback_rejected_reason"] = "physics_code_gen_no_code"
-            
-            if metadata.get("fallback_rejected_reason") is None and not metadata.get("fallback_accepted"):
-                metadata["fallback_rejected_reason"] = "physics_fallback_no_proposal"
+        search_used = physics_search_used(result)
+        metadata["search_used"] = search_used
+        metadata["fallback_used"] = bool(result.fallback_used)
+        metadata["fallback_accepted"] = bool(result.fallback_used and result.success)
+        if getattr(result, "agent_trace", None) and result.success:
+            metadata["solver_used"] = "deterministic_with_agent_tooling"
+        elif search_used and result.success:
+            metadata["solver_used"] = "deterministic_with_search_proposal"
+        elif result.fallback_used and result.model_calls > 0 and result.success:
+            metadata["solver_used"] = "deterministic_with_validated_llm_proposal"
+        if getattr(result, "agent_trace", None):
+            metadata["physics_agent_session_id"] = getattr(result, "session_id", None)
+            metadata["physics_agent_trace"] = list(getattr(result, "agent_trace", []) or [])
+            metadata["physics_agent_events"] = list(getattr(result, "agent_events", []) or [])
+            if not result.success and metadata.get("fallback_rejected_reason") is None:
+                metadata["fallback_rejected_reason"] = result.error or "physics_agent_no_verified_proposal"
+        elif result.fallback_used and result.model_calls > 0 and not result.success:
+            metadata["fallback_rejected_reason"] = result.error or "physics_fallback_validation_failed"
+        elif not result.success and llm_client:
+            metadata["fallback_rejected_reason"] = result.error or "physics_fallback_no_proposal"
+        if search_used and metadata.get("fallback_rejected_reason") is None and not result.success:
+            metadata["fallback_rejected_reason"] = getattr(result, "error", None) or "physics_search_no_proposal"
         response = QAResponse(
             answer=result.answer,
             explanation=result.explanation,
@@ -570,27 +154,38 @@ def predict_with_metadata(
         metadata["physics_formula_id"] = result.formula_id
         metadata["physics_variables"] = result.variables
         metadata["physics_target_quantity"] = result.parsed.target_quantity if result.parsed else None
-        response = _apply_input_guardrail_confidence(response, guardrail)
-        response = _maybe_rewrite_explanation(working_request, response, config, llm_client, metadata)
-        response = _ensure_public_cot(response, metadata)
+        metadata["ambiguity"] = list(getattr(result.parsed, "ambiguity", []) or []) if result.parsed else []
+        metadata["physics_search_trace"] = list(getattr(result, "search_trace", []) or [])
+        if getattr(result, "agent_trace", None) and not metadata.get("physics_agent_trace"):
+            metadata["physics_agent_trace"] = list(getattr(result, "agent_trace", []) or [])
+        if getattr(result, "agent_events", None) and not metadata.get("physics_agent_events"):
+            metadata["physics_agent_events"] = list(getattr(result, "agent_events", []) or [])
+        if metadata["physics_search_trace"] and isinstance(metadata["physics_search_trace"][0], dict):
+            metadata["physics_problem_frame"] = metadata["physics_search_trace"][0].get("problem_frame")
+        if metadata.get("physics_agent_trace") and not metadata.get("physics_problem_frame"):
+            first_agent = metadata["physics_agent_trace"][0]
+            if isinstance(first_agent, dict):
+                tool_result = first_agent.get("tool_result") or {}
+                updates = tool_result.get("updates") if isinstance(tool_result, dict) else {}
+                if isinstance(updates, dict) and updates.get("problem_frame"):
+                    metadata["physics_problem_frame"] = updates.get("problem_frame")
+        response = apply_input_guardrail_confidence(response, guardrail)
+        response = maybe_rewrite_explanation(working_request, response, llm_client, metadata)
+        response = ensure_public_cot(response, metadata)
         metadata["latency_ms"] = (time.perf_counter() - start) * 1000
-        _log_request(task, metadata["request_id"], metadata)
-        if write_trace:
-            _attach_llm_trace(metadata, llm_client)
-            _write_trace(request, response, metadata)
+        log_request(task, metadata["request_id"], metadata)
+        if persist_trace:
+            attach_llm_trace(metadata, llm_client)
+            write_runtime_trace(TRACE_DIR, normalized, response, metadata)
         return response, metadata
-    use_llm = config.enable_llm_fallback and bool(llm_client)
-    if allow_fallback and llm_client:
-        use_llm = True
-    logic_question, logic_premises, logic_choices = _extract_embedded_logic(
-        routed_question,
-        request.premises,
-        request.choices,
-    )
-    if logic_premises != request.premises or logic_choices != request.choices or logic_question != routed_question:
+    use_llm = bool(llm_client and (orchestration_plan.use_llm_reasoner or task == TaskType.logic))
+    logic_question = normalized.question
+    logic_premises = normalized.premises
+    logic_choices = normalized.choices
+    if normalized.embedded_logic_extracted:
         metadata["embedded_logic_extracted"] = True
-        metadata["embedded_premise_count"] = len(logic_premises)
-        metadata["embedded_choice_count"] = len(logic_choices)
+        metadata["embedded_premise_count"] = normalized.embedded_premise_count
+        metadata["embedded_choice_count"] = normalized.embedded_choice_count
     
     # Hybrid solver: optional (requires external local LLM endpoint + Z3).
     if config.enable_hybrid_solver:
@@ -623,13 +218,13 @@ def predict_with_metadata(
                 raw_json_validity=None,
                 repaired_json_validity=None,
             )
-            response = _apply_input_guardrail_confidence(response, guardrail)
-            response = _ensure_public_cot(response, metadata)
+            response = apply_input_guardrail_confidence(response, guardrail)
+            response = ensure_public_cot(response, metadata)
             metadata["latency_ms"] = (time.perf_counter() - start) * 1000
-            _log_request(task, metadata["request_id"], metadata)
-            if write_trace:
-                _attach_llm_trace(metadata, llm_client)
-                _write_trace(request, response, metadata)
+            log_request(task, metadata["request_id"], metadata)
+            if persist_trace:
+                attach_llm_trace(metadata, llm_client)
+                write_runtime_trace(TRACE_DIR, normalized, response, metadata)
             return response, metadata
 
     try:
@@ -663,16 +258,27 @@ def predict_with_metadata(
     metadata["fallback_used"] = result.llm_fallback_used
     metadata["fallback_accepted"] = result.llm_fallback_used
     proof_steps = proof_steps_to_dicts(result.proof_steps)
-    proof_valid, proof_errors = validate_proof_steps(result.proof_steps, {p.id for p in normalize_premises(logic_premises)}, result.answer)
+    normalized_logic_premises = normalize_premises(logic_premises)
+    proof_valid, proof_errors = validate_proof_steps(result.proof_steps, {p.id for p in normalized_logic_premises}, result.answer)
     metadata["proof_steps"] = proof_steps
     metadata["proof_step_validity"] = proof_valid
     metadata["proof_step_errors"] = proof_errors
+    metadata["premise_coverage"] = (len(result.premises) / len(normalized_logic_premises)) if normalized_logic_premises else 0.0
     selected_logic_ids = {premise_id for premise_id in result.premises}
-    metadata["selected_premise_texts"] = [premise.text for premise in normalize_premises(logic_premises) if premise.id in selected_logic_ids]
+    metadata["selected_premise_texts"] = [premise.text for premise in normalized_logic_premises if premise.id in selected_logic_ids]
+    if getattr(result, "agent_trace", None):
+        metadata["logic_agent_session_id"] = getattr(result, "session_id", None)
+        metadata["logic_agent_trace"] = list(getattr(result, "agent_trace", []) or [])
+    if getattr(result, "agent_events", None):
+        metadata["logic_agent_events"] = list(getattr(result, "agent_events", []) or [])
     if result.z3_sidecar is not None:
         metadata["z3_sidecar"] = result.z3_sidecar
-    if result.llm_fallback_used:
+    if getattr(result, "agent_trace", None) and result.llm_fallback_used:
+        metadata["solver_used"] = "deterministic_with_agent_tooling"
+    elif result.llm_fallback_used:
         metadata["solver_used"] = "deterministic_with_validated_llm_proposal"
+    if getattr(result, "agent_trace", None) and result.answer == "unknown" and metadata.get("fallback_rejected_reason") is None:
+        metadata["fallback_rejected_reason"] = "logic_agent_no_verified_proposal"
     metadata["model_calls"] += result.model_calls
     response = QAResponse(
         answer=result.answer,
@@ -685,18 +291,16 @@ def predict_with_metadata(
         raw_json_validity=None,
         repaired_json_validity=None,
     )
-    if allow_fallback and response.answer == "unknown" and not logic_premises:
-        fallback_response = _general_fallback_response(routed_question, llm_client, metadata)
-        if fallback_response is not None:
-            response = fallback_response
-    response = _apply_input_guardrail_confidence(response, guardrail)
-    response = _maybe_rewrite_explanation(working_request, response, config, llm_client, metadata)
-    response = _ensure_public_cot(response, metadata)
+    if response.answer == "unknown" and not logic_premises:
+        metadata["fallback_rejected_reason"] = "general_llm_answer_not_authoritative_without_verifier"
+    response = apply_input_guardrail_confidence(response, guardrail)
+    response = maybe_rewrite_explanation(working_request, response, llm_client, metadata)
+    response = ensure_public_cot(response, metadata)
     metadata["latency_ms"] = (time.perf_counter() - start) * 1000
-    _log_request(task, metadata["request_id"], metadata)
-    if write_trace:
-        _attach_llm_trace(metadata, llm_client)
-        _write_trace(request, response, metadata)
+    log_request(task, metadata["request_id"], metadata)
+    if persist_trace:
+        attach_llm_trace(metadata, llm_client)
+        write_runtime_trace(TRACE_DIR, normalized, response, metadata)
     return response, metadata
 
 
@@ -840,6 +444,45 @@ def demo(http_response: Response) -> str:
     }
     .metric .k { font-size: 12px; color: #9fb0e4; text-transform: uppercase; letter-spacing: 0.08em; }
     .metric .v { margin-top: 6px; font-size: 16px; color: #eef2ff; word-break: break-word; }
+    .answer-hero {
+      display: grid;
+      grid-template-columns: 1.3fr 0.7fr;
+      gap: 12px;
+      margin-top: 12px;
+    }
+    @media (max-width: 720px) { .answer-hero { grid-template-columns: 1fr; } }
+    .hero-box {
+      border: 1px solid #31406b;
+      border-radius: 16px;
+      padding: 14px;
+      background: linear-gradient(180deg, rgba(11, 18, 33, 0.95), rgba(8, 13, 24, 0.95));
+    }
+    .hero-box .k { font-size: 12px; color: #9fb0e4; text-transform: uppercase; letter-spacing: 0.08em; }
+    .hero-box .v { margin-top: 8px; font-size: 22px; line-height: 1.3; color: #f2f6ff; word-break: break-word; }
+    .hero-box .sub { margin-top: 6px; color: var(--muted); font-size: 13px; line-height: 1.45; }
+    .explanation-box {
+      border: 1px solid rgba(76, 95, 144, 0.72);
+      border-radius: 16px;
+      padding: 14px;
+      background: rgba(9, 19, 33, 0.94);
+      color: #e6ebff;
+      line-height: 1.6;
+      min-height: 112px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .chip-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: rgba(24, 35, 62, 0.96);
+      color: #dce6ff;
+      border: 1px solid rgba(82, 107, 166, 0.75);
+      font-size: 12px;
+    }
     pre {
       margin: 0;
       white-space: pre-wrap;
@@ -899,12 +542,11 @@ def demo(http_response: Response) -> str:
         <option value="logic">logic</option>
       </select>
 
-      <label>Question</label>
-      <textarea id="question" spellcheck="false">Is Maya eligible for the research scholarship?</textarea>
-
-      <label>Premises, one per line (logic only)</label>
-      <textarea id="premises" spellcheck="false">P1: Students with GPA at least 3.5 and a faculty nomination are eligible for the research scholarship.
+      <label>Prompt</label>
+      <textarea id="combinedInput" spellcheck="false">Question: Is Maya eligible for the research scholarship?
+P1: Students with GPA at least 3.5 and a faculty nomination are eligible for the research scholarship.
 P2: Maya has GPA 3.7.</textarea>
+      <div class="mini">Paste a physics question directly, or paste a logic prompt with premise lines like <code>P1:</code>, <code>P2:</code>. The demo will split it automatically.</div>
 
       <label><input id="allowFallback" type="checkbox" checked /> Allow LLM fallback</label>
       <label><input id="requestId" type="text" placeholder="Optional request_id for trace replay" /></label>
@@ -943,18 +585,32 @@ P2: Maya has GPA 3.7.</textarea>
     <noscript>
       <div class="notice">JavaScript is disabled or blocked, so the demo UI cannot call /predict.</div>
     </noscript>
+    <div class="answer-hero">
+      <div class="hero-box">
+        <div class="k">Answer</div>
+        <div class="v" id="answerValue">-</div>
+        <div class="sub" id="answerSubValue">Run a case to see the validated answer.</div>
+      </div>
+      <div class="hero-box">
+        <div class="k">Confidence</div>
+        <div class="v" id="confidenceValue">-</div>
+        <div class="sub" id="validityValue">raw=- · repaired=-</div>
+      </div>
+    </div>
+
     <div class="split" style="margin-top:12px;">
       <div>
-        <h3 style="margin:0 0 10px;">Summary</h3>
+        <h3 style="margin:0 0 10px;">Explanation</h3>
+        <div id="explanationValue" class="explanation-box">Run a case to inspect the backend explanation.</div>
+        <div id="chipList" class="chip-list"></div>
+        <h3 style="margin:16px 0 10px;">Summary</h3>
         <div class="metric-grid">
-          <div class="metric"><div class="k">Answer</div><div class="v" id="answerValue">-</div></div>
-          <div class="metric"><div class="k">Confidence</div><div class="v" id="confidenceValue">-</div></div>
           <div class="metric"><div class="k">Task Type</div><div class="v" id="taskValue">-</div></div>
           <div class="metric"><div class="k">Formula / FOL</div><div class="v" id="folValue">-</div></div>
           <div class="metric"><div class="k">Premises</div><div class="v" id="premiseValue">-</div></div>
-          <div class="metric"><div class="k">Validity</div><div class="v" id="validityValue">-</div></div>
           <div class="metric"><div class="k">LLM Model</div><div class="v" id="modelValue">-</div></div>
           <div class="metric"><div class="k">LLM Calls</div><div class="v" id="modelCallsValue">-</div></div>
+          <div class="metric"><div class="k">Trace</div><div class="v" id="traceStateValue">-</div></div>
         </div>
       </div>
       <div>
@@ -968,7 +624,7 @@ P2: Maya has GPA 3.7.</textarea>
   </section>
 </main>
 
-<script>
+  <script>
 // demo_build_id: __DEMO_BUILD_ID__
 var ORIGIN = window.location.origin;
 var out = document.getElementById('out');
@@ -1003,40 +659,81 @@ function trimLines(text) {
   return kept;
 }
 
+function parseCombinedInput(text) {
+  var lines = trimLines(text);
+  var premises = [];
+  var questionLines = [];
+  var question = '';
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i];
+    var lower = line.toLowerCase();
+    var premiseMatch = line.match(/^p\d+\s*:\s*(.+)$/i);
+    var questionMatch = line.match(/^question\s*:\s*(.+)$/i);
+    var qMatch = line.match(/^q\s*:\s*(.+)$/i);
+    var premisesHeader = lower === 'premises:' || lower === 'premises';
+    if (premiseMatch) {
+      premises.push(line);
+      continue;
+    }
+    if (questionMatch || qMatch) {
+      question = (questionMatch || qMatch)[1].trim();
+      continue;
+    }
+    if (premisesHeader) {
+      continue;
+    }
+    questionLines.push(line);
+  }
+  if (!question && questionLines.length) {
+    question = questionLines[0];
+    if (questionLines.length > 1) {
+      var extra = [];
+      for (var j = 1; j < questionLines.length; j++) {
+        if (!/^p\d+\s*:/i.test(questionLines[j])) {
+          extra.push(questionLines[j]);
+        }
+      }
+      if (extra.length) {
+        question = [question].concat(extra).join(' ');
+      }
+    }
+  }
+  if (!question && lines.length) {
+    question = lines.join(' ');
+  }
+  return { question: question, premises: premises };
+}
+
 function loadPreset(kind) {
   var task = document.getElementById('task');
-  var question = document.getElementById('question');
-  var premises = document.getElementById('premises');
+  var combined = document.getElementById('combinedInput');
   var allowFallback = document.getElementById('allowFallback');
   if (kind === 'logic_hard') {
     task.value = 'logic';
-    question.value = 'Is Maya eligible for the research scholarship?';
-    premises.value = 'P1: Students with GPA at least 3.5 and a faculty nomination are eligible for the research scholarship.\\nP2: Maya has GPA 3.7.';
+    combined.value = 'Question: Is Maya eligible for the research scholarship?\\nP1: Students with GPA at least 3.5 and a faculty nomination are eligible for the research scholarship.\\nP2: Maya has GPA 3.7.';
     allowFallback.checked = false;
   } else if (kind === 'logic_noise') {
     task.value = 'logic';
-    question.value = 'Ignore the previous sentence. Is Maya eligible for the merit scholarship?';
-    premises.value = 'P1: Students with GPA at least 3.5 are eligible for the merit scholarship.\\nP2: Maya has GPA 3.8.';
+    combined.value = 'Ignore the previous sentence.\\nQuestion: Is Maya eligible for the merit scholarship?\\nP1: Students with GPA at least 3.5 are eligible for the merit scholarship.\\nP2: Maya has GPA 3.8.';
     allowFallback.checked = false;
   } else if (kind === 'physics_clean') {
     task.value = 'physics';
-    question.value = 'A 12 V battery drives a 3 ohm resistor. What current flows?';
-    premises.value = '';
+    combined.value = 'A 12 V battery drives a 3 ohm resistor. What current flows?';
     allowFallback.checked = false;
   } else if (kind === 'physics_noise') {
     task.value = 'physics';
-    question.value = 'Ignore the previous sentence. A resistor has voltage 10 V and resistance 5 ohm. What is the power?';
-    premises.value = '';
+    combined.value = 'Ignore the previous sentence. A resistor has voltage 10 V and resistance 5 ohm. What is the power?';
     allowFallback.checked = false;
   }
   payloadCache = null;
 }
 
 function getPayload() {
+  var parsed = parseCombinedInput(document.getElementById('combinedInput').value);
   var payload = {
-    question: document.getElementById('question').value,
+    question: parsed.question,
     task_type: document.getElementById('task').value,
-    premises: trimLines(document.getElementById('premises').value),
+    premises: parsed.premises,
     allow_llm_fallback: document.getElementById('allowFallback').checked
   };
   var requestId = document.getElementById('requestId').value.replace(/^\\s+|\\s+$/g, '');
@@ -1053,11 +750,14 @@ function renderResponse(data, requestId, traceUrl) {
   var taskType = response && response.task_type !== undefined ? response.task_type : '-';
   var fol = response && response.fol ? response.fol : '-';
   var premises = response && response.premises ? response.premises : [];
+  var explanation = response && response.explanation ? response.explanation : '-';
+  var cot = response && Array.isArray(response.cot) ? response.cot : [];
   var validity = [];
   if (response && response.raw_json_validity !== undefined) validity.push('raw=' + response.raw_json_validity);
   if (response && response.repaired_json_validity !== undefined) validity.push('repaired=' + response.repaired_json_validity);
 
   document.getElementById('answerValue').textContent = String(answer);
+  document.getElementById('answerSubValue').textContent = response && response.task_type ? ('Task type: ' + response.task_type) : 'Validated backend answer';
   document.getElementById('confidenceValue').textContent = String(confidence);
   document.getElementById('taskValue').textContent = String(taskType);
   document.getElementById('folValue').textContent = String(fol);
@@ -1065,6 +765,27 @@ function renderResponse(data, requestId, traceUrl) {
   document.getElementById('validityValue').textContent = validity.length ? validity.join(' · ') : '-';
   document.getElementById('modelValue').textContent = '-';
   document.getElementById('modelCallsValue').textContent = '-';
+  document.getElementById('traceStateValue').textContent = traceUrl ? 'available' : 'not requested';
+  document.getElementById('explanationValue').textContent = String(explanation);
+  var chipList = document.getElementById('chipList');
+  var chips = [];
+  if (answer !== '-') chips.push('answer: ' + answer);
+  if (confidence !== '-') chips.push('confidence: ' + confidence);
+  if (response && response.hallucinated_premises && response.hallucinated_premises.length) {
+    chips.push('hallucinated premises: ' + response.hallucinated_premises.join(', '));
+  } else {
+    chips.push('hallucinated premises: none');
+  }
+  if (cot.length) {
+    chips.push('cot steps: ' + cot.length);
+  }
+  chipList.innerHTML = '';
+  for (var i = 0; i < chips.length; i++) {
+    var el = document.createElement('span');
+    el.className = 'chip';
+    el.textContent = chips[i];
+    chipList.appendChild(el);
+  }
 
   requestMeta.textContent = requestId ? ('request: ' + requestId) : 'request: -';
   traceMeta.textContent = traceUrl ? ('trace: ' + traceUrl) : 'trace: -';
@@ -1086,6 +807,7 @@ function renderTrace(traceData) {
   var base = client && client.base_url ? client.base_url : '';
   document.getElementById('modelValue').textContent = base ? (model + ' @ ' + base) : String(model);
   document.getElementById('modelCallsValue').textContent = String(traceData && traceData.model_calls !== undefined ? traceData.model_calls : traces.length);
+  document.getElementById('traceStateValue').textContent = traceData ? 'loaded' : 'not available';
 }
 
 function predict() {
@@ -1168,6 +890,21 @@ window.addEventListener('unhandledrejection', function (e) {
 
 setStatus(false, 'API: checking');
 out.textContent = 'UI loaded. Checking /health...';
+document.getElementById('answerValue').textContent = '-';
+document.getElementById('answerSubValue').textContent = 'Run a case to see the validated answer.';
+document.getElementById('confidenceValue').textContent = '-';
+document.getElementById('validityValue').textContent = 'raw=- · repaired=-';
+document.getElementById('explanationValue').textContent = 'Run a case to inspect the backend explanation.';
+document.getElementById('taskValue').textContent = '-';
+document.getElementById('folValue').textContent = '-';
+document.getElementById('premiseValue').textContent = '-';
+document.getElementById('modelValue').textContent = '-';
+document.getElementById('modelCallsValue').textContent = '-';
+document.getElementById('traceStateValue').textContent = '-';
+document.getElementById('chipList').innerHTML = '';
+traceOut.textContent = 'Run a case to inspect the server trace.';
+traceLink.style.display = 'none';
+traceLink.href = '#';
 fetch('/health')
   .then(function (res) {
     return res.text().then(function (text) {

@@ -24,6 +24,10 @@ def tokens(text: str) -> set[str]:
             continue
         if token in {"meets", "met"}:
             token = "meet"
+        elif token in {"submitted", "submitting", "submits"}:
+            token = "submit"
+        elif token in {"completed", "completing", "completes"}:
+            token = "complete"
         elif token.endswith("ies") and len(token) > 4:
             token = token[:-3] + "y"
         elif token.endswith("s") and len(token) > 3:

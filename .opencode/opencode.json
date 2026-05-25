@@ -56,6 +56,26 @@
         "webfetch": "deny",
         "websearch": "deny"
       }
+    },
+    "llm-worker": {
+      "description": "JSON-only proposal worker for /predict orchestration and explanation rewriting.",
+      "mode": "primary",
+      "model": "ollama/qwen2.5:7b",
+      "prompt": "You are a JSON-only language worker. Return only the requested text or JSON. Do not call tools. Do not read files. Do not write files. Do not run commands. Do not mention hidden reasoning.",
+      "permission": {
+        "read": "deny",
+        "glob": "deny",
+        "grep": "deny",
+        "list": "deny",
+        "bash": "deny",
+        "edit": "deny",
+        "write": "deny",
+        "webfetch": "deny",
+        "websearch": "deny",
+        "skill": {
+          "*": "deny"
+        }
+      }
     }
   }
 }

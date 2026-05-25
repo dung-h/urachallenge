@@ -1,9 +1,4 @@
 pipeline:
-  # Live DeepSeek and Qwen3 answer fallback stayed disabled after Phase 7.1/7.2:
-  # DeepSeek accepted 0 proposals; Qwen3 accepted 2 but degraded accuracy.
-  enable_llm_fallback: false
-  # Explanation rewriting is optional/manual only. Template explanations from backend trace are production default.
-  enable_llm_explanation: false
   fallback_confidence_threshold: 0.7
   deterministic_physics_authority: true
   validate_premise_ids: true
@@ -14,8 +9,8 @@ pipeline:
   z3_allowed_domains:
     - academic_policy
     - public_logic_sample
-  # Strict total-parameter budget: use at most one optional LLM worker model.
-  # LLM workers remain disabled by default; if enabled, all roles reuse Gemma 4 E2B-it (~2B).
-  reasoner_model: gemma4_e2b_it
-  formatter_model: gemma4_e2b_it
-  secondary_formatter_model: gemma4_e2b_it
+  # Strict total-parameter budget: use at most one optional local LLM worker model.
+  # Runtime may override via URA_OPENCODE_MODEL / URA_LLM_MODEL.
+  reasoner_model: qwen2.5:7b
+  formatter_model: qwen2.5:7b
+  secondary_formatter_model: qwen2.5:7b
