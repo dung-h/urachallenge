@@ -93,6 +93,11 @@ class EvalResult:
     status_code: int | None
     error: str
     request_id: str
+    solver_used: str = ""
+    model_calls: int | None = None
+    fallback_rejected_reason: str = ""
+    physics_search_used: bool | None = None
+    physics_search_error: str = ""
 
 
 def clean_text(text: str) -> str:
@@ -239,6 +244,19 @@ def call_predict(
     return clean_text(payload.get("answer", "")), response.status_code, "", request_id
 
 
+def fetch_trace(client: httpx.Client, api_url: str, request_id: str, timeout: float) -> dict[str, Any]:
+    if not request_id:
+        return {}
+    try:
+        response = client.get(f"{api_url.rstrip('/')}/trace/{request_id}", timeout=timeout)
+        if response.status_code != 200:
+            return {}
+        payload = response.json()
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
 def run_eval(args: argparse.Namespace) -> list[EvalResult]:
     cases = select_cases(load_cases(args.dataset), args.limit, args.mode, args.seed)
     if not cases:
@@ -257,6 +275,7 @@ def run_eval(args: argparse.Namespace) -> list[EvalResult]:
                 args.timeout,
                 args.request_options,
             )
+            trace = fetch_trace(client, args.api_url, request_id, args.timeout) if args.fetch_trace else {}
             latency_ms = (time.perf_counter() - started) * 1000
             ok = False if error else numeric_match(case.expected_answer, case.expected_unit, predicted, args.rel_tol)
             result = EvalResult(
@@ -269,6 +288,11 @@ def run_eval(args: argparse.Namespace) -> list[EvalResult]:
                 status_code=status_code,
                 error=error,
                 request_id=request_id,
+                solver_used=str(trace.get("solver_used") or ""),
+                model_calls=trace.get("model_calls") if isinstance(trace.get("model_calls"), int) else None,
+                fallback_rejected_reason=str(trace.get("fallback_rejected_reason") or ""),
+                physics_search_used=trace.get("physics_search_used") if isinstance(trace.get("physics_search_used"), bool) else None,
+                physics_search_error=str(trace.get("physics_search_error") or ""),
             )
             results.append(result)
             if args.verbose or index % args.progress_every == 0 or index == len(cases):
@@ -288,6 +312,11 @@ def write_report(results: list[EvalResult], path: Path) -> None:
                 "latency_ms",
                 "status_code",
                 "request_id",
+                "solver_used",
+                "model_calls",
+                "fallback_rejected_reason",
+                "physics_search_used",
+                "physics_search_error",
                 "expected",
                 "predicted",
                 "error",
@@ -303,6 +332,11 @@ def write_report(results: list[EvalResult], path: Path) -> None:
                     "latency_ms": f"{result.latency_ms:.3f}",
                     "status_code": result.status_code,
                     "request_id": result.request_id,
+                    "solver_used": result.solver_used,
+                    "model_calls": result.model_calls,
+                    "fallback_rejected_reason": result.fallback_rejected_reason,
+                    "physics_search_used": result.physics_search_used,
+                    "physics_search_error": result.physics_search_error,
                     "expected": result.expected,
                     "predicted": result.predicted,
                     "error": result.error,
@@ -391,6 +425,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path, default=_path(_cfg(config, "output", DEFAULT_REPORT)), help="CSV report output path.")
     parser.add_argument("--summary-output", type=Path, default=None if _cfg(config, "summary_output", None) is None else _path(_cfg(config, "summary_output", None)), help="JSON summary output path. Defaults to <output>.summary.json.")
     parser.add_argument("--progress-every", type=int, default=int(_cfg(config, "progress_every", 25)), help="Print progress every N cases.")
+    parser.add_argument("--fetch-trace", action=argparse.BooleanOptionalAction, default=bool(_cfg(config, "fetch_trace", True)), help="Fetch /trace/{request_id} and include fallback/search debug columns.")
     parser.add_argument("--verbose", action="store_true", help="Print every case.")
     parser.set_defaults(request_options=dict(_cfg(config, "request", {})))
     return parser

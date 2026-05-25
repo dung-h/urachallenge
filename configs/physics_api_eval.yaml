@@ -14,6 +14,7 @@ physics_api_eval:
   timeout: 30
   rel_tol: 0.03
   progress_every: 25
+  fetch_trace: true
 
   # Outputs.
   output: outputs/physics_eval_500.csv

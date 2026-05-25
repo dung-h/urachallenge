@@ -9,6 +9,10 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.responses import RedirectResponse
 
+from app.env import load_dotenv
+
+load_dotenv()
+
 from app.router import router
 
 

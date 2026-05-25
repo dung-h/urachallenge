@@ -18,6 +18,9 @@ env/
 htmlcov/
 
 # Runtime artifacts
+.env
+.env.*
+!.env.example
 logs/
 outputs/
 *.log
