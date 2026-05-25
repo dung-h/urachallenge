@@ -1,0 +1,27 @@
+physics_api_eval:
+  # API server running app.main:app.
+  api_url: http://127.0.0.1:8000
+
+  # Dataset and sampling.
+  dataset: data/Physics_Problems_Text_Only.csv
+  # 0 means all rows. Set 100, 500, etc. for quicker runs.
+  limit: 100
+  # first or random
+  mode: first
+  seed: 42
+
+  # Evaluation behavior.
+  timeout: 30
+  rel_tol: 0.03
+  progress_every: 25
+
+  # Outputs.
+  output: outputs/physics_eval_500.csv
+  summary_output: outputs/physics_eval_500.summary.json
+
+  # Payload options sent to /predict in addition to {"question": "..."}.
+  # Set allow_llm_fallback to true to enable model fallback/search paths when
+  # the server is configured with an LLM backend and SERPER_API_KEY.
+  request:
+    task_type: physics
+    allow_llm_fallback: true

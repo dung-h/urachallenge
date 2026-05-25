@@ -20,6 +20,7 @@ from app.explanation_worker import build_explanation_trace, validate_explanation
 # NOTE: hybrid_solver is optional (depends on extra packages like z3). We import it lazily.
 from app.llm_client import FallbackClient, OpenAICompatibleLLMClient, HuggingFaceLLMClient
 from app.physics.solver import solve as solve_physics, solve_from_llm_suggestion, solve_from_llm_code
+from app.physics.web_search import search_formula_context
 from app.pipeline_config import PipelineConfig, load_pipeline_config
 from app.schemas import QARequest, QAResponse, TaskType
 
@@ -380,6 +381,11 @@ def _write_trace(request: QARequest, response: QAResponse, metadata: dict[str, A
         "fallback_used": metadata.get("fallback_used", False),
         "fallback_accepted": metadata.get("fallback_accepted", False),
         "fallback_rejected_reason": metadata.get("fallback_rejected_reason"),
+        "physics_search_used": metadata.get("physics_search_used", False),
+        "physics_search_cache_hit": metadata.get("physics_search_cache_hit"),
+        "physics_search_query": metadata.get("physics_search_query"),
+        "physics_search_sources": metadata.get("physics_search_sources", []),
+        "physics_search_error": metadata.get("physics_search_error"),
         "model_calls": metadata.get("model_calls", 0),
         "latency_ms": metadata.get("latency_ms", 0.0),
         "answer": response.answer,
@@ -460,6 +466,22 @@ def predict_with_metadata(
             use_search=allow_fallback,
         )
         if allow_fallback and llm_client and (not result.success or result.confidence < config.fallback_confidence_threshold):
+            formula_context: str | None = None
+            if config.enable_physics_web_search:
+                try:
+                    search_result = search_formula_context(request.question)
+                except Exception as exc:
+                    search_result = None
+                    metadata["physics_search_error"] = f"{type(exc).__name__}:{exc}"
+                if search_result is not None:
+                    formula_context = search_result.context
+                    metadata["physics_search_used"] = True
+                    metadata["physics_search_cache_hit"] = search_result.cache_hit
+                    metadata["physics_search_query"] = search_result.search_query
+                    metadata["physics_search_cache_key"] = search_result.cache_key
+                    metadata["physics_search_sources"] = search_result.sources
+                else:
+                    metadata["physics_search_used"] = False
             # Try formula suggestion first
             try:
                 suggestion = llm_client.suggest_physics(request.question)
@@ -481,7 +503,7 @@ def predict_with_metadata(
             # If formula suggestion failed, try code generation
             if not result.success or result.confidence < config.fallback_confidence_threshold:
                 try:
-                    code = llm_client.generate_physics_code(request.question)
+                    code = llm_client.generate_physics_code(request.question, formula_context=formula_context)
                     metadata["model_calls"] += 1
                 except Exception as exc:
                     code = None

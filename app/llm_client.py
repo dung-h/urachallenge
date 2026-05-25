@@ -36,7 +36,7 @@ class LLMResult:
 class FallbackClient(Protocol):
     def suggest_physics(self, question: str) -> dict[str, Any] | None: ...
 
-    def generate_physics_code(self, question: str) -> str | None: ...
+    def generate_physics_code(self, question: str, formula_context: str | None = None) -> str | None: ...
 
     def suggest_logic(self, question: str, premises: list[str]) -> dict[str, Any] | None: ...
 
@@ -104,9 +104,14 @@ class OpenAICompatibleLLMClient:
         prompt = f"Question: {question}\nReturn JSON with target_quantity, formula_id, variables in SI units, and units."
         return self._json_chat("physics_formula_assistant", prompt)
 
-    def generate_physics_code(self, question: str) -> str | None:
+    def generate_physics_code(self, question: str, formula_context: str | None = None) -> str | None:
         """Generate Python code to solve a physics problem."""
         prompt = f"Question: {question}"
+        if formula_context:
+            prompt = (
+                f"{prompt}\n\nFormula/search context:\n{formula_context}\n\n"
+                "Use the context only to choose the formula. Do all arithmetic in Python code."
+            )
         result = self.chat("physics_code_generator", prompt, max_tokens=512, response_format=False)
         if result.error or not result.content.strip():
             return None
@@ -211,8 +216,13 @@ class HuggingFaceLLMClient:
         prompt = f"Question: {question}\nReturn JSON with target_quantity, formula_id, variables in SI units, and units."
         return self._json_generate(prompt, max_new_tokens=256)
 
-    def generate_physics_code(self, question: str) -> str | None:
+    def generate_physics_code(self, question: str, formula_context: str | None = None) -> str | None:
         prompt = f"Question: {question}\nGenerate Python code to solve the problem. Return only code in a Python code block if possible."
+        if formula_context:
+            prompt = (
+                f"{prompt}\n\nFormula/search context:\n{formula_context}\n\n"
+                "Use the context only to choose the formula. Do all arithmetic in Python code."
+            )
         text = self._generate(prompt, max_new_tokens=512)
         if not text.strip():
             return None

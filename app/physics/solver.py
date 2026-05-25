@@ -4,6 +4,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.physics.code_sandbox import run_python_code
 from app.physics.formulas import get_formula
 from app.physics.parser import ParsedPhysicsProblem, parse_physics_question
 from app.physics.templates import physics_explanation
@@ -124,22 +125,16 @@ def solve_from_llm_suggestion(question: str, suggestion: dict) -> PhysicsSolutio
 
 
 def solve_from_llm_code(question: str, code: str) -> PhysicsSolution:
-    """Stub executor for LLM-generated code. For safety and test predictability this returns
-    an unsuccessful PhysicsSolution unless the code explicitly prints a single numeric
-    value and unit on stdout as '<value> <unit>'.
+    """Run LLM-generated physics code in a restricted Python subprocess.
+
+    The model is only allowed to produce code. The numeric answer is accepted
+    only from sandbox stdout in the form '<value> <unit>'.
     """
     try:
-        import subprocess
-        from tempfile import NamedTemporaryFile
-        from pathlib import Path
-
-        with NamedTemporaryFile(mode="w", suffix=".py", delete=False, encoding="utf-8") as f:
-            f.write(code)
-            temp_path = Path(f.name)
-        res = subprocess.run(["python", str(temp_path)], capture_output=True, text=True, timeout=3)
-        temp_path.unlink(missing_ok=True)
-        if res.returncode != 0:
-            return PhysicsSolution(success=False, answer="unknown", explanation=f"LLM code failed: {res.stderr[:200]}", formula_id="llm_code_gen", confidence=0.3, fallback_used=True, model_calls=0)
+        res = run_python_code(code, timeout=3)
+        if not res.ok:
+            detail = res.error or res.stderr[:200] or "unknown_error"
+            return PhysicsSolution(success=False, answer="unknown", explanation=f"LLM code failed in sandbox: {detail}", formula_id="llm_code_gen", confidence=0.3, fallback_used=True, model_calls=0, error=detail)
         out = res.stdout.strip()
         parts = out.split()
         if len(parts) >= 2:
@@ -147,9 +142,9 @@ def solve_from_llm_code(question: str, code: str) -> PhysicsSolution:
                 val = float(parts[0])
                 unit = parts[1]
                 answer = format_best_unit(val, unit)
-                return PhysicsSolution(success=True, answer=answer, explanation="LLM code produced numeric output.", formula_id="llm_code_gen", confidence=0.6, fallback_used=True, model_calls=0)
+                return PhysicsSolution(success=True, answer=answer, explanation="Sandboxed Python code produced numeric output.", formula_id="llm_code_gen", confidence=0.6, fallback_used=True, model_calls=0)
             except Exception:
                 pass
-        return PhysicsSolution(success=False, answer="unknown", explanation="LLM code produced no parseable numeric output.", formula_id="llm_code_gen", confidence=0.3, fallback_used=True, model_calls=0)
+        return PhysicsSolution(success=False, answer="unknown", explanation="LLM code produced no parseable numeric output.", formula_id="llm_code_gen", confidence=0.3, fallback_used=True, model_calls=0, error="unparseable_stdout")
     except Exception as exc:
         return PhysicsSolution(success=False, answer="unknown", explanation=f"LLM code execution error: {type(exc).__name__}", formula_id="llm_code_gen", confidence=0.2, fallback_used=True, model_calls=0)

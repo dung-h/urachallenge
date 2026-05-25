@@ -4,6 +4,9 @@ pipeline:
   enable_llm_fallback: false
   # Explanation rewriting is optional/manual only. Template explanations from backend trace are production default.
   enable_llm_explanation: false
+  # Physics fallback can use SERPER_API_KEY to fetch formula context.
+  # Results are cached in outputs/cache/physics_formula_cache.sqlite3.
+  enable_physics_web_search: true
   fallback_confidence_threshold: 0.7
   deterministic_physics_authority: true
   validate_premise_ids: true
