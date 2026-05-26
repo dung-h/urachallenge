@@ -1,27 +1,27 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "provider": {
-    "ollama": {
+    "vllm": {
       "npm": "@ai-sdk/openai-compatible",
-      "name": "Ollama (Windows host)",
+      "name": "vLLM (Windows host)",
       "options": {
-        "baseURL": "http://172.19.96.1:11434/v1"
+        "baseURL": "http://127.0.0.1:8001/v1"
       },
       "models": {
-        "gemma3:4b": {
-          "name": "gemma3:4b"
+        "Qwen/Qwen2.5-7B-Instruct": {
+          "name": "Qwen/Qwen2.5-7B-Instruct"
         },
-        "qwen2.5:7b": {
-          "name": "qwen2.5:7b"
+        "Qwen/Qwen2.5-3B-Instruct": {
+          "name": "Qwen/Qwen2.5-3B-Instruct"
         },
-        "llama3.2:3b": {
-          "name": "llama3.2:3b"
+        "Qwen/Qwen2.5-1.5B-Instruct": {
+          "name": "Qwen/Qwen2.5-1.5B-Instruct"
         }
       }
     }
   },
-  "model": "ollama/qwen2.5:7b",
-  "small_model": "ollama/llama3.2:3b",
+  "model": "Qwen/Qwen2.5-7B-Instruct",
+  "small_model": "Qwen/Qwen2.5-1.5B-Instruct",
   "default_agent": "exact-runner",
   "permission": {
     "skill": {
@@ -35,7 +35,7 @@
     "exact-runner": {
       "description": "URA EXACT challenge operator that routes through the local validated app and inspects traces.",
       "mode": "primary",
-      "model": "ollama/qwen2.5:7b",
+      "model": "Qwen/Qwen2.5-7B-Instruct",
       "prompt": "You are the OpenCode helper operator for the URA EXACT Challenge repo. For concrete challenge questions, run scripts/exact_agent_request.py first and report only the validated backend response as authority. Do not call the skill tool in this agent; this runner is helper-only to avoid tool loops. Prefer one-line helper presets when they fit: python scripts/exact_agent_request.py --report-line --preset sr019, python scripts/exact_agent_request.py --report-line --preset physx_001, python scripts/exact_agent_request.py --report-line --preset sr005, or python scripts/exact_agent_request.py --report-line --preset acad_001. When calling the bash tool, always provide both description and command; never call bash with command only. The bash command must be exactly one python scripts/exact_agent_request.py command; do not append echo, &&, pipes, redirects, or extra shell text. In final text, copy the helper output line and state that raw_model_proposal_answer is not authority. Raw model reasoning is proposal-only. Never override deterministic unknown with yes/no unless backend validation or a narrow solver patch plus focused tests proves it.",
       "permission": {
         "read": "allow",
@@ -60,7 +60,7 @@
     "llm-worker": {
       "description": "JSON-only proposal worker for /predict orchestration and explanation rewriting.",
       "mode": "primary",
-      "model": "ollama/qwen2.5:7b",
+      "model": "Qwen/Qwen2.5-7B-Instruct",
       "prompt": "You are a JSON-only language worker. Return only the requested text or JSON. Do not call tools. Do not read files. Do not write files. Do not run commands. Do not mention hidden reasoning.",
       "permission": {
         "read": "deny",

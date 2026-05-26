@@ -94,11 +94,44 @@ def predict_with_metadata(
 
     metadata["llm_client"] = llm_client_info(llm_client)
     planner_trace_before = len(getattr(llm_client, "call_traces", []) or []) if llm_client is not None else 0
-    orchestration_plan = LLMOrchestrator().plan(normalized, llm_client)
+    try:
+        orchestration_plan = LLMOrchestrator().plan(normalized, llm_client)
+    except Exception as exc:
+        import os
+        from app.runtime_workflow import OrchestrationPlan
+        allow_fallback = os.environ.get("URA_ALLOW_HEURISTIC_FALLBACK") == "1"
+        if not allow_fallback:
+            metadata["fallback_rejected_reason"] = f"orchestrator_failure:{str(exc)}"
+            metadata["solver_used"] = "failed_orchestration"
+            metadata["latency_ms"] = (time.perf_counter() - start) * 1000
+            log_request(TaskType.auto, metadata["request_id"], metadata)
+            raise HTTPException(
+                status_code=503,
+                detail=f"vLLM/OpenAI-compatible endpoint is offline or returned an error: {exc}. "
+                       "Please ensure the local endpoint is running or set URA_ALLOW_HEURISTIC_FALLBACK=1 to allow heuristic backup."
+            ) from exc
+        else:
+            heuristic_plan = LLMOrchestrator()._heuristic_plan(normalized)
+            orchestration_plan = OrchestrationPlan(
+                task_type=heuristic_plan.task_type,
+                route_reason=f"heuristic_fallback_from_exception: {exc}",
+                confidence=heuristic_plan.confidence,
+                use_search=heuristic_plan.use_search,
+                use_llm_reasoner=heuristic_plan.use_llm_reasoner,
+                use_explanation_rewrite=heuristic_plan.use_explanation_rewrite,
+                rescue_unknown=heuristic_plan.rescue_unknown,
+                search_queries=heuristic_plan.search_queries,
+                physics_hint=heuristic_plan.physics_hint,
+                logic_hint=heuristic_plan.logic_hint,
+                source="heuristic_fallback",
+                raw={"error": str(exc)},
+            )
     planner_trace_after = len(getattr(llm_client, "call_traces", []) or []) if llm_client is not None else 0
     if planner_trace_after > planner_trace_before:
         metadata["model_calls"] += planner_trace_after - planner_trace_before
     metadata["orchestration_plan"] = orchestration_plan.as_dict()
+    if orchestration_plan.source == "heuristic_fallback":
+        llm_client = None
     working_request = guarded_request
     heuristic_task = task_router.route(normalized)
     task = orchestration_plan.task_enum() or heuristic_task

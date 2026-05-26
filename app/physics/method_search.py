@@ -817,6 +817,48 @@ def verify_and_compute_method(parsed: ParsedPhysicsProblem, question: str, propo
         if assumption and assumption not in low:
             # Keep verification conservative: extracted evidence must map back to the question.
             return None
+
+    # Cross-validate target units against requested target quantity
+    _TARGET_UNIT_HINTS = {
+        "voltage": "V",
+        "electric_potential": "V",
+        "current": "A",
+        "power": "W",
+        "resistance": "ohm",
+        "impedance": "ohm",
+        "reactance": "ohm",
+        "capacitance": "F",
+        "charge": "C",
+        "energy": "J",
+        "potential_energy": "J",
+        "force": "N",
+        "electric_field": "N/C",
+        "frequency": "Hz",
+        "angular_frequency": "rad/s",
+        "inductance": "H",
+        "magnetic_field": "T",
+        "distance": "m",
+        "dielectric_constant": "dimensionless",
+    }
+    if parsed.target_quantity:
+        expected_unit = _TARGET_UNIT_HINTS.get(parsed.target_quantity)
+        if expected_unit:
+            prop_unit_norm = proposal.target_unit.lower().replace(" ", "").replace("·", "*")
+            expected_unit_norm = expected_unit.lower().replace(" ", "").replace("·", "*")
+            equivalent = False
+            if prop_unit_norm == expected_unit_norm:
+                equivalent = True
+            elif expected_unit_norm == "n/c" and prop_unit_norm in {"n/c", "v/m"}:
+                equivalent = True
+            elif expected_unit_norm == "v/m" and prop_unit_norm in {"n/c", "v/m"}:
+                equivalent = True
+            elif expected_unit_norm == "ohm" and prop_unit_norm in {"ohm", "ω", "Ω", "reactance", "impedance"}:
+                equivalent = True
+
+            if not equivalent:
+                # Target unit mismatch - reject the proposal
+                return None
+
     variables = _extract_method_variables(parsed, question, proposal)
     if set(proposal.variables) - set(variables):
         return None
@@ -825,7 +867,12 @@ def verify_and_compute_method(parsed: ParsedPhysicsProblem, question: str, propo
         proposal=proposal,
         variables=variables,
         value=value,
-        verification_notes=["assumptions matched question", "variables extracted from parsed quantities", "equation evaluated in safe math evaluator"],
+        verification_notes=[
+            "assumptions matched question",
+            "variables extracted from parsed quantities",
+            "target unit verified and matched expected quantity",
+            "equation evaluated in safe math evaluator"
+        ],
     )
 
 

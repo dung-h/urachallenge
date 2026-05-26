@@ -17,7 +17,7 @@ class PipelineConfig:
     # Hybrid solver requires an external local LLM endpoint and Z3.
     # Keep off by default so a fresh install can run the API/UI without extra deps.
     enable_hybrid_solver: bool = False
-    hybrid_api_url: str = "http://localhost:11434/v1/chat/completions"
+    hybrid_api_url: str = "http://127.0.0.1:8001/v1/chat/completions"
     hybrid_model: str = "gemma3:4b"
     fallback_confidence_threshold: float = 0.7
     deterministic_physics_authority: bool = True
@@ -40,7 +40,7 @@ def load_pipeline_config(path: Path = PIPELINE_CONFIG) -> PipelineConfig:
         enable_mcq_symbolic=bool(values.get("enable_mcq_symbolic", False)),
         enable_physics_web_search=bool(values.get("enable_physics_web_search", True)),
         enable_hybrid_solver=bool(values.get("enable_hybrid_solver", False)),
-        hybrid_api_url=str(values.get("hybrid_api_url", "http://localhost:11434/v1/chat/completions")),
+        hybrid_api_url=str(values.get("hybrid_api_url", "http://127.0.0.1:8001/v1/chat/completions")),
         hybrid_model=str(values.get("hybrid_model", "gemma3:4b")),
         fallback_confidence_threshold=float(values.get("fallback_confidence_threshold", 0.7)),
         deterministic_physics_authority=bool(values.get("deterministic_physics_authority", True)),

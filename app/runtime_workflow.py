@@ -448,16 +448,66 @@ class LLMOrchestrator:
         }
 
     def plan(self, normalized: NormalizedRequest, llm_client: Any | None = None) -> OrchestrationPlan:
+        import os
         fallback = self._heuristic_plan(normalized)
         orchestrate = getattr(llm_client, "orchestrate", None) if llm_client is not None else None
         if not callable(orchestrate):
             return fallback
+
+        allow_fallback = os.environ.get("URA_ALLOW_HEURISTIC_FALLBACK") == "1"
+
         try:
             suggestion = orchestrate(self._build_payload(normalized, fallback))
-        except Exception:
+        except Exception as exc:
+            if not allow_fallback:
+                raise RuntimeError(f"LLM Orchestration server call failed: {exc}") from exc
+            fallback_plan = OrchestrationPlan(
+                task_type=fallback.task_type,
+                route_reason=f"heuristic_fallback_from_llm_error: {exc}",
+                confidence=fallback.confidence,
+                use_search=fallback.use_search,
+                use_llm_reasoner=fallback.use_llm_reasoner,
+                use_explanation_rewrite=fallback.use_explanation_rewrite,
+                rescue_unknown=fallback.rescue_unknown,
+                search_queries=fallback.search_queries,
+                physics_hint=fallback.physics_hint,
+                logic_hint=fallback.logic_hint,
+                source="heuristic_fallback",
+                raw={"error": str(exc)},
+            )
+            return fallback_plan
+
+        if suggestion is None:
+            last_trace = llm_client.call_traces[-1] if hasattr(llm_client, "call_traces") and llm_client.call_traces else None
+            if last_trace and last_trace.get("status") == "error":
+                err_msg = last_trace.get("error") or "Unknown connection error"
+                if not allow_fallback:
+                    raise ConnectionError(f"vLLM/OpenAI endpoint connection failed: {err_msg}")
+                fallback_plan = OrchestrationPlan(
+                    task_type=fallback.task_type,
+                    route_reason=f"heuristic_fallback_from_connection_error: {err_msg}",
+                    confidence=fallback.confidence,
+                    use_search=fallback.use_search,
+                    use_llm_reasoner=fallback.use_llm_reasoner,
+                    use_explanation_rewrite=fallback.use_explanation_rewrite,
+                    rescue_unknown=fallback.rescue_unknown,
+                    search_queries=fallback.search_queries,
+                    physics_hint=fallback.physics_hint,
+                    logic_hint=fallback.logic_hint,
+                    source="heuristic_fallback",
+                    raw={"error": err_msg},
+                )
+                return fallback_plan
+
+            if not allow_fallback:
+                raise ValueError("LLM Orchestrator returned empty or invalid JSON suggestion")
             return fallback
+
         if not isinstance(suggestion, dict):
+            if not allow_fallback:
+                raise ValueError("LLM Orchestrator suggestion is not a dictionary")
             return fallback
+
         return self._normalize_plan(suggestion, fallback)
 
 

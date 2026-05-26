@@ -64,6 +64,9 @@ datasets/exact/official/
 # Ignore disagreement tooling and generated regression outputs outside the main runtime flow.
 !scripts/
 scripts/*
+!scripts/start_api.sh
+!scripts/start_vllm_server.sh
+!scripts/real_smoke_tests.py
 !scripts/analysis/
 !scripts/analysis/**
 !tests/

@@ -9,8 +9,8 @@ pipeline:
   z3_allowed_domains:
     - academic_policy
     - public_logic_sample
-  # Strict total-parameter budget: use at most one optional local LLM worker model.
-  # Runtime may override via URA_OPENCODE_MODEL / URA_LLM_MODEL.
-  reasoner_model: qwen2.5:7b
-  formatter_model: qwen2.5:7b
-  secondary_formatter_model: qwen2.5:7b
+  # Strict total-parameter budget: use one local open-weight worker model.
+  # Runtime may override with URA_LLM_MODEL.
+  reasoner_model: Qwen/Qwen2.5-7B-Instruct
+  formatter_model: Qwen/Qwen2.5-7B-Instruct
+  secondary_formatter_model: Qwen/Qwen2.5-7B-Instruct

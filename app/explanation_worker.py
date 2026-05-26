@@ -173,6 +173,54 @@ def validate_explanation_rewrite(explanation: str, trace: ExplanationTrace | dic
     if answer_hints and not any(hint in normalized for hint in answer_hints):
         errors.append("missing_answer_reference")
 
+    # 1. Prompt Echoing detection
+    prompt_patterns = [
+        "you are an explanation worker",
+        "rewrite the backend trace",
+        "without changing the final answer",
+        "return json with a single key",
+        "explanation_rewrite",
+        "do not add new facts",
+        "explanation_trace",
+        "solver_explanation",
+        "trace_version",
+        "public_cot",
+        "solver_used",
+        "selected_premise_ids",
+    ]
+    for pattern in prompt_patterns:
+        if pattern in normalized:
+            errors.append("prompt_echo_detected:" + pattern.replace(" ", "_"))
+            break
+
+    # 2. JSON Structures / Trash detection
+    if rewritten.startswith("{") or "explanation\"" in normalized or re.search(r"explanation\s*:", normalized):
+        errors.append("raw_json_leakage")
+
+    # 3. Off-topic / Content Discrepancy detection
+    question = str(payload.get("question") or "").strip()
+    if question:
+        stop_words = {
+            "what", "find", "determine", "calculate", "with", "from", "that", "this", "then", "have",
+            "does", "some", "each", "were", "been", "only", "must", "show", "give", "here", "about",
+            "them", "their", "when", "where", "which", "your", "more", "less", "much", "many", "such"
+        }
+        q_words = re.findall(r"\b[A-Za-z]{4,}\b", question.lower())
+        important_keywords = {w for w in q_words if w not in stop_words}
+        if important_keywords:
+            overlap = False
+            rewritten_words = set(re.findall(r"\b[A-Za-z]{3,}\b", normalized))
+            for w1 in important_keywords:
+                for w2 in rewritten_words:
+                    # Match if one is a prefix of another, or they share a 4-character prefix (stem matching)
+                    if w1.startswith(w2) or w2.startswith(w1) or w1[:4] == w2[:4]:
+                        overlap = True
+                        break
+                if overlap:
+                    break
+            if not overlap:
+                errors.append("off_topic_explanation_no_keyword_overlap")
+
     task_type = str(payload.get("task_type") or "").strip()
     if task_type == "physics":
         formula_hints = _formula_hints(

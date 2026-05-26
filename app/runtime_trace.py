@@ -70,7 +70,8 @@ def maybe_rewrite_explanation(
         metadata["explanation_rewrite_accepted"] = True
         return response.model_copy(update={"explanation": rewritten})
     metadata["explanation_rewrite_rejected"] = True
-    metadata["fallback_rejected_reason"] = "explanation_rewrite_validation_failed"
+    if not metadata.get("fallback_rejected_reason"):
+        metadata["fallback_rejected_reason"] = "explanation_rewrite_validation_failed"
     return response
 
 
