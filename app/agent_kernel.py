@@ -97,8 +97,12 @@ def run_agent_loop(
     max_steps: int | None = None,
     policy: AgentPolicy | None = None,
 ) -> AgentOutcome:
+    import os
     policy = policy or AgentPolicy(max_steps=max_steps or 4)
     steps = policy.max_steps if max_steps is None else min(policy.max_steps, max_steps)
+    max_agent_steps = int(os.environ.get("URA_MAX_AGENT_STEPS") or "4")
+    steps = min(steps, max_agent_steps)
+    max_model_calls = int(os.environ.get("URA_MAX_MODEL_CALLS") or "5")
     session_id = uuid.uuid4().hex
     trace: list[dict[str, Any]] = []
     events: list[AgentEvent] = []
@@ -131,6 +135,9 @@ def run_agent_loop(
     while step < steps:
         fallback_tool = default_tool(context)
         if callable(planner):
+            if model_calls >= max_model_calls:
+                events.append(AgentEvent(kind="budget_exceeded", step=step + 1, session_id=session_id, detail={"reason": "max_model_calls", "model_calls": model_calls}))
+                break
             try:
                 planned_action = planner(build_payload(context, base_solution, tried_tools, last_result, trace))
                 model_calls += 1
@@ -221,7 +228,9 @@ def run_agent_loop(
 
     reason = None
     details: list[str] = []
-    if isinstance(last_result, dict):
+    if events and events[-1].kind == "budget_exceeded":
+        reason = "budget_exceeded:max_model_calls"
+    elif isinstance(last_result, dict):
         reason = str(last_result.get("error") or last_result.get("summary") or "")
         if isinstance(last_result.get("updates"), dict):
             details = [str(item) for item in last_result["updates"].get("rejected_proposals") or []]

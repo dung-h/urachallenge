@@ -136,7 +136,7 @@ def structural_terms(question: str) -> list[str]:
 def _web_method_search_enabled() -> bool:
     raw = os.environ.get("URA_ENABLE_WEB_METHOD_SEARCH")
     if raw is None:
-        return True
+        return False
     return raw.strip().lower() not in {"0", "false", "no", "off"}
 
 
@@ -337,11 +337,12 @@ def _retrieve_local_evidence(objective: MethodSearchObjective) -> list[MethodEvi
 
 def _retrieve_web_evidence(objective: MethodSearchObjective) -> list[MethodEvidenceSnippet]:
     snippets: list[MethodEvidenceSnippet] = []
-    for query in objective.query_plan[:5]:
+    max_search_calls = int(os.environ.get("URA_MAX_SEARCH_CALLS") or "3")
+    for query in objective.query_plan[:max_search_calls]:
         snippets.extend(_duckduckgo_search(query))
     snippets = _rank_snippets(objective, snippets)
     if not snippets:
-        for query in objective.query_plan[:5]:
+        for query in objective.query_plan[:max_search_calls]:
             snippets.extend(_bing_search(query))
         snippets = _rank_snippets(objective, snippets)
     if snippets:

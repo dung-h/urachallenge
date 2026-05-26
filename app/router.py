@@ -130,7 +130,9 @@ def predict_with_metadata(
     if planner_trace_after > planner_trace_before:
         metadata["model_calls"] += planner_trace_after - planner_trace_before
     metadata["orchestration_plan"] = orchestration_plan.as_dict()
-    if orchestration_plan.source == "heuristic_fallback":
+    if orchestration_plan.source in {"heuristic_fallback", "heuristic_after_invalid_json"}:
+        if orchestration_plan.source == "heuristic_after_invalid_json":
+            metadata["normalization_warnings"].append("planner_invalid_json")
         llm_client = None
     working_request = guarded_request
     heuristic_task = task_router.route(normalized)
@@ -146,9 +148,10 @@ def predict_with_metadata(
     if task == TaskType.physics:
         result = solve_physics(
             routed_question,
-            use_llm_extraction=True,
-            use_search=True,
+            use_llm_extraction=orchestration_plan.use_llm_reasoner,
+            use_search=orchestration_plan.use_search,
             llm_client=llm_client,
+            rescue_unknown=orchestration_plan.rescue_unknown,
         )
         search_used = physics_search_used(result)
         metadata["search_used"] = search_used
@@ -203,7 +206,10 @@ def predict_with_metadata(
                 if isinstance(updates, dict) and updates.get("problem_frame"):
                     metadata["physics_problem_frame"] = updates.get("problem_frame")
         response = apply_input_guardrail_confidence(response, guardrail)
-        response = maybe_rewrite_explanation(working_request, response, llm_client, metadata)
+        if orchestration_plan.use_explanation_rewrite:
+            response = maybe_rewrite_explanation(working_request, response, llm_client, metadata)
+        else:
+            metadata["explanation_rewrite_rejected"] = False
         response = ensure_public_cot(response, metadata)
         metadata["latency_ms"] = (time.perf_counter() - start) * 1000
         log_request(task, metadata["request_id"], metadata)
@@ -327,7 +333,10 @@ def predict_with_metadata(
     if response.answer == "unknown" and not logic_premises:
         metadata["fallback_rejected_reason"] = "general_llm_answer_not_authoritative_without_verifier"
     response = apply_input_guardrail_confidence(response, guardrail)
-    response = maybe_rewrite_explanation(working_request, response, llm_client, metadata)
+    if orchestration_plan.use_explanation_rewrite:
+        response = maybe_rewrite_explanation(working_request, response, llm_client, metadata)
+    else:
+        metadata["explanation_rewrite_rejected"] = False
     response = ensure_public_cot(response, metadata)
     metadata["latency_ms"] = (time.perf_counter() - start) * 1000
     log_request(task, metadata["request_id"], metadata)

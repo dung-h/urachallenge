@@ -11,7 +11,7 @@ from app.physics.expression_eval import safe_eval_expression
 from app.physics.formula_registry import lookup_qualitative
 from app.physics.formulas import FORMULAS, K_COULOMB, Formula, get_formula
 from app.physics.method_search import build_objective as build_method_objective
-from app.physics.method_search import extract_equation_proposals, retrieve_method_evidence, verify_and_compute_method
+from app.physics.method_search import extract_equation_proposals, retrieve_method_evidence, verify_and_compute_method, _web_method_search_enabled
 from app.agent_runtime import run_physics_agent
 from app.physics.parser import ParsedPhysicsProblem, parse_physics_question
 from app.physics.problem_frame import ProblemFrame, infer_problem_frame, search_unknown_explanation
@@ -621,6 +621,7 @@ def _search_registry_formula_solution(parsed: ParsedPhysicsProblem, question: st
         {
             "problem_frame": asdict(frame),
             "query_plan": list(frame.query_plan),
+            "search_mode": "reproducible_local" if not _web_method_search_enabled() else "agentic_web",
         }
     ]
     if not candidates:
@@ -715,6 +716,7 @@ def _search_backed_method_solution(parsed: ParsedPhysicsProblem, question: str) 
         {
             "problem_frame": asdict(frame),
             "method_search_objective": asdict(objective),
+            "search_mode": "reproducible_local" if not _web_method_search_enabled() else "agentic_web",
             "retrieved_evidence": [
                 {
                     "source": snippet.source,
@@ -890,6 +892,7 @@ def _search_backed_spherical_shell_solution(parsed: ParsedPhysicsProblem, questi
         {
             "problem_frame": asdict(frame),
             "method_search_objective": asdict(objective),
+            "search_mode": "reproducible_local" if not _web_method_search_enabled() else "agentic_web",
             "retrieved_evidence": [
                 {
                     "source": snippet.source,
@@ -996,6 +999,7 @@ def _search_backed_spherical_shell_potential_solution(parsed: ParsedPhysicsProbl
         {
             "problem_frame": asdict(frame),
             "method_search_objective": asdict(objective),
+            "search_mode": "reproducible_local" if not _web_method_search_enabled() else "agentic_web",
             "retrieved_evidence": [
                 {
                     "source": snippet.source,
@@ -1321,7 +1325,13 @@ def _compute(parsed: ParsedPhysicsProblem, fallback_used: bool = False, model_ca
     )
 
 
-def solve(question: str, use_llm_extraction: bool = True, use_search: bool = False, llm_client: Any = None) -> PhysicsSolution:
+def solve(
+    question: str,
+    use_llm_extraction: bool = True,
+    use_search: bool = False,
+    llm_client: Any = None,
+    rescue_unknown: bool = True,
+) -> PhysicsSolution:
     """Deterministic physics solver with optional search and agentic rescue.
 
     The backend still computes the final answer, but it can verify search-backed
@@ -1381,7 +1391,7 @@ def solve(question: str, use_llm_extraction: bool = True, use_search: bool = Fal
     solution = search_fallback_solution or _compute(parsed)
     if not solution.success and _insufficient_data_abstain(parsed):
         return solution
-    if solution.success or not use_llm_extraction or llm_client is None:
+    if solution.success or llm_client is None or not (use_llm_extraction or rescue_unknown):
         return solution
     # The agent loop is the last resort for physics rescue. It operates on
     # bounded internal tools and returns only backend-verified proposals.

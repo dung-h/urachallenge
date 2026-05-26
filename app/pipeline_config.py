@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,6 +30,9 @@ class PipelineConfig:
     enable_z3_sidecar: bool = False
     z3_sidecar_mode: str = "experiment_only"
     z3_allowed_domains: tuple[str, ...] = ("academic_policy", "public_logic_sample")
+    max_model_calls: int = 5
+    max_agent_steps: int = 4
+    max_search_calls: int = 3
 
 
 def load_pipeline_config(path: Path = PIPELINE_CONFIG) -> PipelineConfig:
@@ -52,4 +56,7 @@ def load_pipeline_config(path: Path = PIPELINE_CONFIG) -> PipelineConfig:
         enable_z3_sidecar=bool(values.get("enable_z3_sidecar", False)),
         z3_sidecar_mode=str(values.get("z3_sidecar_mode", "experiment_only")),
         z3_allowed_domains=tuple(values.get("z3_allowed_domains", ["academic_policy", "public_logic_sample"])),
+        max_model_calls=int(os.environ.get("URA_MAX_MODEL_CALLS") or values.get("max_model_calls", 5)),
+        max_agent_steps=int(os.environ.get("URA_MAX_AGENT_STEPS") or values.get("max_agent_steps", 4)),
+        max_search_calls=int(os.environ.get("URA_MAX_SEARCH_CALLS") or values.get("max_search_calls", 3)),
     )

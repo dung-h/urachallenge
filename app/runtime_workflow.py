@@ -477,6 +477,15 @@ class LLMOrchestrator:
             )
             return fallback_plan
 
+        # Retry once for JSON validation error if the server is live (status == "ok")
+        if suggestion is None:
+            last_trace = llm_client.call_traces[-1] if hasattr(llm_client, "call_traces") and llm_client.call_traces else None
+            if last_trace and last_trace.get("status") == "ok":
+                try:
+                    suggestion = orchestrate(self._build_payload(normalized, fallback))
+                except Exception:
+                    suggestion = None
+
         if suggestion is None:
             last_trace = llm_client.call_traces[-1] if hasattr(llm_client, "call_traces") and llm_client.call_traces else None
             if last_trace and last_trace.get("status") == "error":
@@ -499,14 +508,37 @@ class LLMOrchestrator:
                 )
                 return fallback_plan
 
-            if not allow_fallback:
-                raise ValueError("LLM Orchestrator returned empty or invalid JSON suggestion")
-            return fallback
+            # Safe deterministic route with warning for invalid JSON
+            return OrchestrationPlan(
+                task_type=fallback.task_type,
+                route_reason="heuristic_fallback_from_invalid_json",
+                confidence=fallback.confidence,
+                use_search=fallback.use_search,
+                use_llm_reasoner=fallback.use_llm_reasoner,
+                use_explanation_rewrite=fallback.use_explanation_rewrite,
+                rescue_unknown=fallback.rescue_unknown,
+                search_queries=fallback.search_queries,
+                physics_hint=fallback.physics_hint,
+                logic_hint=fallback.logic_hint,
+                source="heuristic_after_invalid_json",
+                raw={"error": "LLM Orchestrator returned empty or invalid JSON suggestion"},
+            )
 
         if not isinstance(suggestion, dict):
-            if not allow_fallback:
-                raise ValueError("LLM Orchestrator suggestion is not a dictionary")
-            return fallback
+            return OrchestrationPlan(
+                task_type=fallback.task_type,
+                route_reason="heuristic_fallback_from_invalid_dict",
+                confidence=fallback.confidence,
+                use_search=fallback.use_search,
+                use_llm_reasoner=fallback.use_llm_reasoner,
+                use_explanation_rewrite=fallback.use_explanation_rewrite,
+                rescue_unknown=fallback.rescue_unknown,
+                search_queries=fallback.search_queries,
+                physics_hint=fallback.physics_hint,
+                logic_hint=fallback.logic_hint,
+                source="heuristic_after_invalid_json",
+                raw={"error": "LLM Orchestrator suggestion was not a dictionary"},
+            )
 
         return self._normalize_plan(suggestion, fallback)
 
