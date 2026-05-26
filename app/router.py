@@ -133,6 +133,7 @@ def predict_with_metadata(
     if orchestration_plan.source in {"heuristic_fallback", "heuristic_after_invalid_json"}:
         if orchestration_plan.source == "heuristic_after_invalid_json":
             metadata["normalization_warnings"].append("planner_invalid_json")
+            metadata["planner_invalid_json"] = True
         llm_client = None
     working_request = guarded_request
     heuristic_task = task_router.route(normalized)
@@ -152,6 +153,9 @@ def predict_with_metadata(
             use_search=orchestration_plan.use_search,
             llm_client=llm_client,
             rescue_unknown=orchestration_plan.rescue_unknown,
+            max_agent_steps=config.max_agent_steps,
+            max_model_calls=config.max_model_calls,
+            max_search_calls=config.max_search_calls,
         )
         search_used = physics_search_used(result)
         metadata["search_used"] = search_used
@@ -206,7 +210,8 @@ def predict_with_metadata(
                 if isinstance(updates, dict) and updates.get("problem_frame"):
                     metadata["physics_problem_frame"] = updates.get("problem_frame")
         response = apply_input_guardrail_confidence(response, guardrail)
-        if orchestration_plan.use_explanation_rewrite:
+        metadata["explanation_rewrite_policy"] = "always_on_with_live_llm"
+        if llm_client is not None:
             response = maybe_rewrite_explanation(working_request, response, llm_client, metadata)
         else:
             metadata["explanation_rewrite_rejected"] = False
@@ -277,6 +282,8 @@ def predict_with_metadata(
             z3_sidecar_mode=config.z3_sidecar_mode,
             enable_mcq_symbolic=config.enable_mcq_symbolic,
             choices=logic_choices,
+            max_agent_steps=config.max_agent_steps,
+            max_model_calls=config.max_model_calls,
         )
     except Exception as exc:
         if use_llm:
@@ -291,6 +298,8 @@ def predict_with_metadata(
                 z3_sidecar_mode=config.z3_sidecar_mode,
                 enable_mcq_symbolic=False,
                 choices=logic_choices,
+                max_agent_steps=config.max_agent_steps,
+                max_model_calls=config.max_model_calls,
             )
         else:
             raise
@@ -333,7 +342,8 @@ def predict_with_metadata(
     if response.answer == "unknown" and not logic_premises:
         metadata["fallback_rejected_reason"] = "general_llm_answer_not_authoritative_without_verifier"
     response = apply_input_guardrail_confidence(response, guardrail)
-    if orchestration_plan.use_explanation_rewrite:
+    metadata["explanation_rewrite_policy"] = "always_on_with_live_llm"
+    if llm_client is not None:
         response = maybe_rewrite_explanation(working_request, response, llm_client, metadata)
     else:
         metadata["explanation_rewrite_rejected"] = False

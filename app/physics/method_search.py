@@ -311,10 +311,10 @@ def _specialized_queries(target: str, terms: list[str]) -> list[str]:
     return deduped
 
 
-def retrieve_method_evidence(objective: MethodSearchObjective) -> list[MethodEvidenceSnippet]:
+def retrieve_method_evidence(objective: MethodSearchObjective, max_search_calls: int | None = None) -> list[MethodEvidenceSnippet]:
     snippets: list[MethodEvidenceSnippet] = []
     if _web_method_search_enabled():
-        snippets.extend(_retrieve_web_evidence(objective))
+        snippets.extend(_retrieve_web_evidence(objective, max_search_calls=max_search_calls))
     if not snippets:
         snippets.extend(_retrieve_local_evidence(objective))
     else:
@@ -335,9 +335,9 @@ def _retrieve_local_evidence(objective: MethodSearchObjective) -> list[MethodEvi
     return results
 
 
-def _retrieve_web_evidence(objective: MethodSearchObjective) -> list[MethodEvidenceSnippet]:
+def _retrieve_web_evidence(objective: MethodSearchObjective, max_search_calls: int | None = None) -> list[MethodEvidenceSnippet]:
     snippets: list[MethodEvidenceSnippet] = []
-    max_search_calls = int(os.environ.get("URA_MAX_SEARCH_CALLS") or "3")
+    max_search_calls = max_search_calls if max_search_calls is not None else int(os.environ.get("URA_MAX_SEARCH_CALLS") or "3")
     for query in objective.query_plan[:max_search_calls]:
         snippets.extend(_duckduckgo_search(query))
     snippets = _rank_snippets(objective, snippets)

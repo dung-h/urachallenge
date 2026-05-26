@@ -119,8 +119,16 @@ def run_physics_agent(
     base_solution: dict[str, Any] | None = None,
     allow_llm_rescue: bool = True,
     max_steps: int = 4,
+    max_model_calls: int | None = None,
+    max_search_calls: int = 3,
 ) -> PhysicsAgentOutcome:
-    context = PhysicsAgentContext(question=question, parsed=parsed, llm_client=llm_client, allow_llm_rescue=allow_llm_rescue)
+    context = PhysicsAgentContext(
+        question=question,
+        parsed=parsed,
+        llm_client=llm_client,
+        allow_llm_rescue=allow_llm_rescue,
+        max_search_calls=max_search_calls,
+    )
     agent_outcome = run_agent_loop(
         llm_client=llm_client,
         allowed_tools=_ALLOWED_TOOLS,
@@ -132,6 +140,7 @@ def run_physics_agent(
         base_solution=base_solution,
         planner_method_name="plan_physics_action",
         max_steps=max_steps,
+        max_model_calls=max_model_calls,
     )
     if agent_outcome.success:
         return _to_outcome(

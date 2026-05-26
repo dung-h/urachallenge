@@ -24,6 +24,7 @@ class PhysicsAgentContext:
     parsed: ParsedPhysicsProblem
     llm_client: Any | None = None
     allow_llm_rescue: bool = True
+    max_search_calls: int = 3
     frame: ProblemFrame | None = None
     objective: MethodSearchObjective | None = None
     evidence: list[MethodEvidenceSnippet] = field(default_factory=list)
@@ -79,7 +80,7 @@ def retrieve_evidence(context: PhysicsAgentContext) -> PhysicsToolResult:
         inspect_problem(context)
     objective = context.objective
     assert objective is not None
-    snippets = retrieve_method_evidence(objective)
+    snippets = retrieve_method_evidence(objective, max_search_calls=context.max_search_calls)
     context.evidence = snippets
     return PhysicsToolResult(
         tool="retrieve_method_evidence",

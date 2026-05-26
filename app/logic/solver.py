@@ -977,6 +977,8 @@ def solve(
     z3_sidecar_mode: str = "experiment_only",
     enable_mcq_symbolic: bool = False,
     choices: list[str] | None = None,
+    max_agent_steps: int = 4,
+    max_model_calls: int = 5,
 ) -> LogicSolution:
     question = guardrail_prompt_text(question).normalized_text
     normalized = normalize_premises(premises)
@@ -1072,7 +1074,8 @@ def solve(
             base_solution=solution,
             choices=list(choices or []),
             allow_llm_rescue=True,
-            max_steps=4,
+            max_steps=max_agent_steps,
+            max_model_calls=max_model_calls,
         )
         model_calls += agent_outcome.model_calls
         if agent_outcome.success:

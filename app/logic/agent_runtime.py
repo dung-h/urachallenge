@@ -77,6 +77,7 @@ def run_logic_agent(
     choices: list[str] | None = None,
     allow_llm_rescue: bool = True,
     max_steps: int = 4,
+    max_model_calls: int | None = None,
 ) -> LogicAgentOutcome:
     context = LogicAgentContext(
         question=question,
@@ -104,6 +105,7 @@ def run_logic_agent(
         },
         planner_method_name="plan_logic_action",
         max_steps=max_steps,
+        max_model_calls=max_model_calls,
     )
     return LogicAgentOutcome(
         success=agent_outcome.success,

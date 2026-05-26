@@ -95,14 +95,17 @@ def run_agent_loop(
     base_solution: dict[str, Any] | None = None,
     planner_method_name: str = "plan_action",
     max_steps: int | None = None,
+    max_model_calls: int | None = None,
     policy: AgentPolicy | None = None,
 ) -> AgentOutcome:
     import os
     policy = policy or AgentPolicy(max_steps=max_steps or 4)
-    steps = policy.max_steps if max_steps is None else min(policy.max_steps, max_steps)
-    max_agent_steps = int(os.environ.get("URA_MAX_AGENT_STEPS") or "4")
-    steps = min(steps, max_agent_steps)
-    max_model_calls = int(os.environ.get("URA_MAX_MODEL_CALLS") or "5")
+    env_max_steps = int(os.environ.get("URA_MAX_AGENT_STEPS") or "4")
+    if max_steps is None:
+        steps = min(policy.max_steps, env_max_steps)
+    else:
+        steps = min(policy.max_steps, max_steps)
+    max_model_calls = max_model_calls if max_model_calls is not None else int(os.environ.get("URA_MAX_MODEL_CALLS") or "5")
     session_id = uuid.uuid4().hex
     trace: list[dict[str, Any]] = []
     events: list[AgentEvent] = []

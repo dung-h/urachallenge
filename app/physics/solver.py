@@ -703,11 +703,11 @@ def _search_registry_formula_solution(parsed: ParsedPhysicsProblem, question: st
         )
 
 
-def _search_backed_method_solution(parsed: ParsedPhysicsProblem, question: str) -> PhysicsSolution | None:
+def _search_backed_method_solution(parsed: ParsedPhysicsProblem, question: str, max_search_calls: int = 3) -> PhysicsSolution | None:
     if parsed.formula_id:
         return None
     objective = build_method_objective(parsed, question)
-    snippets = retrieve_method_evidence(objective)
+    snippets = retrieve_method_evidence(objective, max_search_calls=max_search_calls)
     if not snippets:
         return None
     proposals = extract_equation_proposals(objective, snippets)
@@ -832,7 +832,7 @@ def _search_backed_open_switch_solution(parsed: ParsedPhysicsProblem, question: 
     return None
 
 
-def _search_backed_spherical_shell_solution(parsed: ParsedPhysicsProblem, question: str) -> PhysicsSolution | None:
+def _search_backed_spherical_shell_solution(parsed: ParsedPhysicsProblem, question: str, max_search_calls: int = 3) -> PhysicsSolution | None:
     low = question.lower()
     if parsed.target_quantity != "electric_field":
         return None
@@ -842,7 +842,7 @@ def _search_backed_spherical_shell_solution(parsed: ParsedPhysicsProblem, questi
         return None
 
     objective = build_method_objective(parsed, question)
-    snippets = retrieve_method_evidence(objective)
+    snippets = retrieve_method_evidence(objective, max_search_calls=max_search_calls)
     shell_snippets = [
         snippet
         for snippet in snippets
@@ -942,7 +942,7 @@ def _search_backed_spherical_shell_solution(parsed: ParsedPhysicsProblem, questi
     )
 
 
-def _search_backed_spherical_shell_potential_solution(parsed: ParsedPhysicsProblem, question: str) -> PhysicsSolution | None:
+def _search_backed_spherical_shell_potential_solution(parsed: ParsedPhysicsProblem, question: str, max_search_calls: int = 3) -> PhysicsSolution | None:
     low = question.lower()
     if "spherical shell" not in low and ("sphere" not in low or "shell" not in low):
         return None
@@ -950,7 +950,7 @@ def _search_backed_spherical_shell_potential_solution(parsed: ParsedPhysicsProbl
         return None
 
     objective = build_method_objective(parsed, question)
-    snippets = retrieve_method_evidence(objective)
+    snippets = retrieve_method_evidence(objective, max_search_calls=max_search_calls)
     shell_snippets = [
         snippet
         for snippet in snippets
@@ -1137,7 +1137,7 @@ def _search_backed_solenoid_solution(parsed: ParsedPhysicsProblem, question: str
     return None
 
 
-def _search_backed_registry_formula_solution(parsed: ParsedPhysicsProblem, question: str) -> PhysicsSolution | None:
+def _search_backed_registry_formula_solution(parsed: ParsedPhysicsProblem, question: str, max_search_calls: int = 3) -> PhysicsSolution | None:
     if _insufficient_data_abstain(parsed):
         frame = _search_context(parsed, question)
         return PhysicsSolution(
@@ -1156,13 +1156,13 @@ def _search_backed_registry_formula_solution(parsed: ParsedPhysicsProblem, quest
             model_calls=0,
             search_trace=[{"problem_frame": asdict(frame), "query_plan": ["formula registry search blocked by insufficient data"]}],
         )
-    solution = _search_backed_spherical_shell_potential_solution(parsed, question)
+    solution = _search_backed_spherical_shell_potential_solution(parsed, question, max_search_calls=max_search_calls)
     if solution is not None:
         return solution
-    solution = _search_backed_spherical_shell_solution(parsed, question)
+    solution = _search_backed_spherical_shell_solution(parsed, question, max_search_calls=max_search_calls)
     if solution is not None:
         return solution
-    solution = _search_backed_method_solution(parsed, question)
+    solution = _search_backed_method_solution(parsed, question, max_search_calls=max_search_calls)
     if solution is not None:
         return solution
     for helper in (
@@ -1325,12 +1325,24 @@ def _compute(parsed: ParsedPhysicsProblem, fallback_used: bool = False, model_ca
     )
 
 
+def _call_search_helper(helper: Any, parsed: ParsedPhysicsProblem, question: str, max_search_calls: int) -> PhysicsSolution | None:
+    try:
+        return helper(parsed, question, max_search_calls=max_search_calls)
+    except TypeError as exc:
+        if "max_search_calls" not in str(exc):
+            raise
+        return helper(parsed, question)
+
+
 def solve(
     question: str,
     use_llm_extraction: bool = True,
     use_search: bool = False,
     llm_client: Any = None,
     rescue_unknown: bool = True,
+    max_agent_steps: int = 4,
+    max_model_calls: int = 5,
+    max_search_calls: int = 3,
 ) -> PhysicsSolution:
     """Deterministic physics solver with optional search and agentic rescue.
 
@@ -1360,7 +1372,12 @@ def solve(
             fallback_used=False,
             model_calls=0,
         )
-    shell_potential_solution = _search_backed_spherical_shell_potential_solution(parsed, normalized)
+    shell_potential_solution = _call_search_helper(
+        _search_backed_spherical_shell_potential_solution,
+        parsed,
+        normalized,
+        max_search_calls,
+    )
     if shell_potential_solution is not None:
         return shell_potential_solution
     search_fallback_solution: PhysicsSolution | None = None
@@ -1372,7 +1389,12 @@ def solve(
             if search_solution.success:
                 return search_solution
             search_fallback_solution = search_solution
-        search_solution = _search_backed_registry_formula_solution(parsed, normalized)
+        search_solution = _call_search_helper(
+            _search_backed_registry_formula_solution,
+            parsed,
+            normalized,
+            max_search_calls,
+        )
         if search_solution is not None:
             if search_solution.success:
                 return search_solution
@@ -1410,8 +1432,10 @@ def solve(
             "error": solution.error,
             "search_trace": list(solution.search_trace),
         },
-        allow_llm_rescue=True,
-        max_steps=4,
+        allow_llm_rescue=rescue_unknown,
+        max_steps=max_agent_steps,
+        max_model_calls=max_model_calls,
+        max_search_calls=max_search_calls,
     )
     fallback_result = PhysicsSolution(
         success=agent_outcome.success,
