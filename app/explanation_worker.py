@@ -234,14 +234,14 @@ def validate_explanation_rewrite(explanation: str, trace: ExplanationTrace | dic
             errors.append("missing_geometry_reference:perpendicular")
     elif task_type == "logic":
         selected_ids = [str(pid).strip().upper() for pid in payload.get("selected_premise_ids") or [] if str(pid).strip()]
+        present_ids = {match.upper() for match in re.findall(r"\bP\d+\b", rewritten, re.I)}
         if selected_ids:
-            present_ids = {match.upper() for match in re.findall(r"\bP\d+\b", rewritten, re.I)}
             missing_ids = [pid for pid in selected_ids if pid not in present_ids]
             if missing_ids:
                 errors.append("missing_premise_ids:" + ",".join(missing_ids))
-            foreign_ids = sorted(present_ids - set(selected_ids))
-            if foreign_ids:
-                errors.append("foreign_premise_ids:" + ",".join(foreign_ids))
+        foreign_ids = sorted(present_ids - set(selected_ids))
+        if foreign_ids:
+            errors.append("foreign_premise_ids:" + ",".join(foreign_ids))
         proof_notes = " ".join(_norm(step.get("notes") or "") for step in payload.get("proof_steps") or [] if isinstance(step, dict))
         for protected_phrase in ("missing faculty nomination condition", "existential witness"):
             if (protected_phrase in proof_notes or protected_phrase in solver_explanation) and protected_phrase not in normalized:

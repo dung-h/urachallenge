@@ -1102,9 +1102,9 @@ def solve(
             return solution
         solution = LogicSolution(
             answer=answer,
-            explanation=agent_outcome.explanation if agent_outcome.explanation else logic_explanation(answer, selected, rule),
+            explanation=agent_outcome.explanation if (agent_outcome.success and agent_outcome.explanation) else logic_explanation(answer, selected, rule),
             premises=[p.id for p in selected],
-            cot=list(agent_outcome.cot) or [f"Agent stopped after {len(agent_outcome.agent_trace)} steps", f"Final reason: {agent_outcome.error or 'logic_agent_no_verified_proposal'}"],
+            cot=list(agent_outcome.cot) if agent_outcome.success else [f"Normalized {len(normalized)} premises", f"Selected premises: {', '.join(p.id for p in selected)}", f"Rule: {rule}"],
             confidence=confidence,
             hallucinated_premises=hallucinated,
             llm_fallback_used=True,

@@ -812,11 +812,18 @@ def _proposal_from_ratio_relation(snippet: MethodEvidenceSnippet, objective: Met
     )
 
 
-def verify_and_compute_method(parsed: ParsedPhysicsProblem, question: str, proposal: MethodEquationProposal) -> VerifiedMethod | None:
+def verify_and_compute_method(
+    parsed: ParsedPhysicsProblem,
+    question: str,
+    proposal: MethodEquationProposal,
+    reject_reasons: list[str] | None = None,
+) -> VerifiedMethod | None:
     low = question.lower()
     for assumption in proposal.assumptions:
         if assumption and assumption not in low:
             # Keep verification conservative: extracted evidence must map back to the question.
+            if reject_reasons is not None:
+                reject_reasons.append(f"assumption mismatch: '{assumption}' not in question")
             return None
 
     # Cross-validate target units against requested target quantity
@@ -858,10 +865,15 @@ def verify_and_compute_method(parsed: ParsedPhysicsProblem, question: str, propo
 
             if not equivalent:
                 # Target unit mismatch - reject the proposal
+                if reject_reasons is not None:
+                    reject_reasons.append(f"target unit mismatch: expected {expected_unit_norm}, got {prop_unit_norm}")
                 return None
 
     variables = _extract_method_variables(parsed, question, proposal)
-    if set(proposal.variables) - set(variables):
+    missing = set(proposal.variables) - set(variables)
+    if missing:
+        if reject_reasons is not None:
+            reject_reasons.append(f"missing variables: {', '.join(missing)}")
         return None
     value = safe_eval_expression(proposal.expression, variables)
     return VerifiedMethod(

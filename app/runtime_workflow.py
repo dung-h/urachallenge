@@ -96,6 +96,7 @@ class RuntimeTrace(BaseModel):
     selected_premises: list[str] = Field(default_factory=list)
     confidence: float = 0.0
     confidence_factors: dict[str, Any] = Field(default_factory=dict)
+    physics_variables: dict[str, Any] = Field(default_factory=dict)
     proof_steps: list[dict[str, Any]] = Field(default_factory=list)
     proof_step_validity: bool | None = None
     proof_step_errors: list[str] = Field(default_factory=list)
@@ -566,6 +567,7 @@ def build_runtime_trace(
         selected_premises=list(response.premises),
         confidence=response.confidence,
         confidence_factors=dict(metadata.get("confidence_factors") or {}),
+        physics_variables=dict(metadata.get("physics_variables") or {}),
         proof_steps=list(metadata.get("proof_steps") or []),
         proof_step_validity=metadata.get("proof_step_validity"),
         proof_step_errors=list(metadata.get("proof_step_errors") or []),

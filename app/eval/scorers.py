@@ -76,6 +76,12 @@ class QualityScore:
     explanation_consistent: bool
     confidence_bucket: str
     latency_ms: float
+    cites_selected_premise: bool | None = None
+    cites_formula: bool | None = None
+    no_hallucinated_premises: bool | None = None
+    no_hallucinated_formulas: bool | None = None
+    unknown_specificity: bool | None = None
+    no_prompt_echo_or_leak: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -197,7 +203,12 @@ def confidence_bucket(response: QAResponse) -> str:
     return "low"
 
 
-def score_response(row: dict[str, Any], response: QAResponse, latency_ms: float) -> QualityScore:
+def score_response(
+    row: dict[str, Any],
+    response: QAResponse,
+    latency_ms: float,
+    metadata: dict[str, Any] | None = None,
+) -> QualityScore:
     if row.get("task_type") == "physics":
         answer_correct, numeric_correct, unit_correct = _score_physics(row, response)
     else:
@@ -205,6 +216,10 @@ def score_response(row: dict[str, Any], response: QAResponse, latency_ms: float)
         numeric_correct = None
         unit_correct = None
     premise_precision, premise_recall, hallucinated = _premise_scores(row, response)
+
+    from app.eval.explanation_metrics import evaluate_explanation_grounding
+    grounding = evaluate_explanation_grounding(response.explanation or "", response, metadata or {})
+
     return QualityScore(
         answer_correct=answer_correct,
         numeric_correct=numeric_correct,
@@ -216,4 +231,10 @@ def score_response(row: dict[str, Any], response: QAResponse, latency_ms: float)
         explanation_consistent=_explanation_consistent(row, response),
         confidence_bucket=confidence_bucket(response),
         latency_ms=latency_ms,
+        cites_selected_premise=grounding["cites_selected_premise"],
+        cites_formula=grounding["cites_formula"],
+        no_hallucinated_premises=grounding["no_hallucinated_premises"],
+        no_hallucinated_formulas=grounding["no_hallucinated_formulas"],
+        unknown_specificity=grounding["unknown_specificity"],
+        no_prompt_echo_or_leak=grounding["no_prompt_echo_or_leak"],
     )

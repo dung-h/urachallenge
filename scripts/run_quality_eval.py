@@ -14,7 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.eval.scorers import gold_answer, score_response
-from app.router import predict_response
+from app.router import predict_with_metadata
 from app.schemas import QARequest
 
 
@@ -189,9 +189,9 @@ def run(paths: list[Path], report_dir: Path, write_reports: bool = True) -> dict
             allow_llm_fallback=False,
         )
         started = time.perf_counter()
-        response = predict_response(request)
+        response, metadata = predict_with_metadata(request)
         latency_ms = (time.perf_counter() - started) * 1000
-        score = score_response(row, response, latency_ms)
+        score = score_response(row, response, latency_ms, metadata)
         dataset_key = f"{path.name}:{task}"
         for bucket in (aggregate[task], by_dataset[dataset_key]):
             _add(bucket, score)

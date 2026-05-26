@@ -761,9 +761,14 @@ def _search_backed_method_solution(parsed: ParsedPhysicsProblem, question: str, 
             ]
         }
     )
+    rejected_proposals_reasons = []
     for proposal in sorted(proposals, key=lambda item: item.confidence, reverse=True):
-        verified = verify_and_compute_method(parsed, question, proposal)
+        reasons = []
+        verified = verify_and_compute_method(parsed, question, proposal, reasons)
         if verified is None:
+            rejected_proposals_reasons.append(
+                f"{proposal.method_id} ({proposal.method_family}): rejected because {', '.join(reasons)}"
+            )
             continue
         answer = format_best_unit(verified.value, proposal.target_unit)
         trace.append(
@@ -800,18 +805,14 @@ def _search_backed_method_solution(parsed: ParsedPhysicsProblem, question: str, 
             model_calls=0,
             search_trace=trace,
         )
-    proposal_notes = [
-        f"{proposal.method_family}: {', '.join(proposal.assumptions[:3]) or 'no assumptions extracted'}"
-        for proposal in sorted(proposals, key=lambda item: item.confidence, reverse=True)[:3]
-    ]
-    trace.append({"rejected_method_proposals": proposal_notes})
+    trace.append({"rejected_method_proposals": rejected_proposals_reasons})
     return PhysicsSolution(
         success=False,
         answer="unknown",
         explanation=_search_unknown_explanation(
             frame,
             "no_verified_method_proposal",
-            details=proposal_notes,
+            details=rejected_proposals_reasons[:4],
         ),
         formula_id=None,
         confidence=0.2,

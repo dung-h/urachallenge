@@ -141,21 +141,25 @@ def verify_candidates(context: PhysicsAgentContext) -> PhysicsToolResult:
         extract_candidates(context)
     verified: VerifiedMethod | None = None
     rejected: list[str] = []
+    rejected_reasons: dict[str, list[str]] = {}
     for proposal in sorted(context.proposals, key=lambda item: item.confidence, reverse=True):
-        candidate = verify_and_compute_method(context.parsed, context.question, proposal)
+        reasons = []
+        candidate = verify_and_compute_method(context.parsed, context.question, proposal, reasons)
         if candidate is not None:
             verified = candidate
             context.verified = candidate
             break
         rejected.append(f"{proposal.method_family}:{proposal.method_id}")
+        rejected_reasons[proposal.method_id] = reasons
     if verified is None:
         frame = context.frame or infer_problem_frame(context.parsed, context.question)
+        rejected_notes = [f"{pid}: {', '.join(reasons)}" for pid, reasons in rejected_reasons.items()]
         return PhysicsToolResult(
             tool="verify_and_compute_method",
             ok=False,
             summary="no proposal verified",
-            updates={"rejected_proposals": rejected},
-            error=search_unknown_explanation(frame, "no_verified_method_proposal", details=rejected),
+            updates={"rejected_proposals": rejected, "rejected_reasons": rejected_reasons},
+            error=search_unknown_explanation(frame, "no_verified_method_proposal", details=rejected_notes),
         )
 
     answer = format_best_unit(verified.value, verified.proposal.target_unit)
