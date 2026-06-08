@@ -17,57 +17,79 @@ env/
 .coverage.*
 htmlcov/
 
-# Runtime artifacts
+# Local env/secrets
 .env
 .env.*
 !.env.example
+
+# Logs and scratch files
 logs/
-outputs/
-outputs/disagreements/
-outputs/traces/
 *.log
 *.tmp
 *.swp
 *.swo
 *.bak
+scratch/
 
-# Local data / vendor downloads
+# Runtime/generated outputs
+outputs/
+outputs/disagreements/
+outputs/traces/
+
+# Reports: keep tracked canonical reports, ignore new/generated local reports by default.
+reports/*
+!reports/ablation_eval_cases.jsonl
+!reports/ablation_eval_summary.json
+!reports/four_layer_quality_report.md
+!reports/opencode_exact_agent_integration_report.md
+!reports/quality_eval_error_cases.jsonl
+!reports/quality_eval_summary.md
+!reports/trace_grounded_verified_qa_report.md
+
+# Local data/model/vendor downloads
 archive/
-third_party/
 clones/
+datasets/
+models/
+third_party/
+
+# Large/backend local artifacts
+*.gguf
+*.safetensors
+*.pt
+*.pth
+*.bin
+*.tar.gz
+*.zip
+
+# OpenCode local package artifacts
 .opencode/node_modules/
 .opencode/package.json
 .opencode/package-lock.json
 .opencode/bun.lock
-models/
-models/gguf/
-models/hf/
-models/finetuned/
 
-# Internal context docs that should stay local and out of packaging workflows
-AGENTS.md
-docs/context/PROJECT_STATE.md
-docs/context/CURRENT_WORK.md
+# Agent tool state (local only, not for sync)
+.claude/
+.kiro/
 
-reports/
-reports/disagreement_generation_report.md
-reports/phase*_*.md
-reports/*_report.md
-scripts/
-tests/
-datasets/
-docs/
-# Challenge/private raw datasets
-datasets/exact/
-datasets/exact/official/
+# Throwaway / diagnostic scripts (per AGENTS.md §23)
+_tmp_*.py
+scripts/_diag_*.py
+scripts/_tmp_*.sh
 
-# Ignore disagreement tooling and generated regression outputs outside the main runtime flow.
-!scripts/
-scripts/*
-!scripts/start_api.sh
-!scripts/start_vllm_server.sh
-!scripts/real_smoke_tests.py
-!scripts/analysis/
-!scripts/analysis/**
-!tests/
-tests/*
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# One-off request files
+test_req.json
+
+# Reports: add canonical session reports (override reports/* above)
+!reports/deep_test_planner_summary.md
+!reports/deep_test_planner_cases.jsonl
+!reports/session_method_centric_full_summary.md
+!reports/dataset_correction_report.md
+!reports/hard_eval_50_cases.jsonl
+!reports/hard_eval_50_summary.md
+!reports/random_batch_results.jsonl
+!reports/eval_planner_vs_legacy.json
+!reports/hard_eval_v2_fixes_report.md
