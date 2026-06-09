@@ -1,0 +1,116 @@
+# OpenCode EXACT Agent Integration Report
+
+Date/time: 2026-05-21 Asia/Saigon
+
+## What Was Done
+
+- Added project-local OpenCode EXACT skills under `.opencode/skills/`.
+- Added repo-local OpenCode config at `.opencode/opencode.json`.
+- Added `scripts/exact_agent_request.py` for consistent `/predict` plus `/trace` calls.
+- Kept backend `/predict` as answer authority; OpenCode/model output remains proposal-only.
+
+## Files Changed
+
+- `.opencode/opencode.json`
+- `.opencode/skills/exact-challenge/SKILL.md`
+- `.opencode/skills/exact-logic/SKILL.md`
+- `.opencode/skills/exact-physics/SKILL.md`
+- `.opencode/skills/exact-debug/SKILL.md`
+- `scripts/exact_agent_request.py`
+- `.gitignore`
+
+## Commands Run
+
+- `python -m json.tool .opencode/opencode.json`
+- YAML frontmatter validation for all `.opencode/skills/*/SKILL.md`
+- `python -m py_compile scripts/exact_agent_request.py`
+- Helper smoke for `acad_001`, `sr019`, `physx_001`, `sr005`
+- OpenCode skill discovery smoke with `ollama/qwen2.5:7b`
+- OpenCode helper smoke with `ollama/qwen2.5:7b --pure`
+- `python -m pytest -s -q tests/test_phase_6_fallback.py tests/test_router.py tests/test_schemas.py tests/test_policy_unknown_handling.py tests/test_invalid_inference_traps.py`
+
+## Metrics Collected
+
+| Check | Result |
+| --- | --- |
+| Skill frontmatter | 4/4 valid |
+| Helper smoke | 4/4 pass |
+| OpenCode skill discovery | pass |
+| OpenCode pure helper smoke | pass |
+| OpenCode exact-runner unattended smoke | partial; model/tool schema issues remain |
+| 11-case app/helper batch | 11/11 pass |
+| Focused pytest | 29 passed |
+
+## Known Issues
+
+- `gemma3:4b` does not support OpenCode tools through the tested Ollama path.
+- `qwen2.5:7b` supports tools, but as `exact-runner` it can omit the required bash `description` field or fall into repeated skill loads.
+- `opencode run --pure --model ollama/qwen2.5:7b` can call the helper successfully when explicitly instructed to include `description` and `command`.
+
+## Next Recommended Action
+
+- Treat OpenCode as an assisted operator for now, not a fully unattended authority.
+- Keep using `scripts/exact_agent_request.py` for traceable manual/OpenCode checks.
+- If OpenCode is promoted further, test a stronger local tool-calling model or a custom OpenCode command wrapper.
+
+## Cleanup Done
+
+- Added root ignore rules for `.opencode/node_modules/` and local OpenCode package/lock files.
+- Confirmed no lingering `opencode run` process remained after smoke tests.
+- Did not touch `clones/`.
+
+## Update: Priority 1 Stabilization
+
+Date/time: 2026-05-22 Asia/Bangkok
+
+### What Changed
+
+- Added built-in helper presets: `acad_001`, `sr019`, `physx_001`, and `sr005`.
+- Added compact helper outputs via `--summary` and `--report-line`.
+- Added explicit fields that separate `validated_backend_answer` from `raw_model_proposal_answer`.
+- Made helper tolerant of OpenCode's harmless `--no-edit-files` addition.
+- Updated `exact-runner` to be helper-only and deny skill calls to prevent repeated skill-load loops.
+
+### Verification
+
+| Check | Result |
+| --- | --- |
+| `python -m json.tool .opencode/opencode.json` | pass |
+| `python -m py_compile scripts/exact_agent_request.py` | pass |
+| Helper report-line presets | 4/4 pass |
+| OpenCode exact-runner helper command | helper command succeeds |
+| Focused pytest | 29 passed |
+
+### Remaining OpenCode Model Risk
+
+- `qwen2.5:7b` can now call the helper with the short preset command, but its final prose can still paraphrase instead of copying the helper line exactly.
+- The reliable artifact is the helper/tool output line, for example:
+  `validated_backend_answer=unknown trace_url=/trace/opencode-sr019 model_calls=1 raw_model_proposal_answer=yes authority=validated_backend_response`
+
+## Update: Hybrid Symbolic Path
+
+Date/time: 2026-05-22 Asia/Bangkok
+
+### What Changed
+
+- Added `app/logic/hybrid_solver.py`.
+- The hybrid solver translates only known-safe natural-language patterns to symbolic predicates.
+- Z3 is used as prover when translation is deterministic and complete.
+- Required-condition language such as `A requires B` is translated in the safe direction `A -> B`, so satisfying `B` does not prove `A`.
+- Production defaults remain unchanged; `enable_hybrid_solver` is still off unless explicitly enabled.
+
+### Verification
+
+| Check | Result |
+| --- | --- |
+| Universal yes proof | pass |
+| Universal no proof | pass |
+| Required-condition trap | pass |
+| Router with `enable_hybrid_solver=True` | pass |
+| Focused pytest | 21 passed |
+
+### Example
+
+For `P1: Eligibility for the award requires submitting a portfolio` and `P2: Mira submitted a portfolio`, the hybrid path returns:
+
+`answer=unknown`, `z3_status=not_entailed`, `fol=eligible_award(mira)`, `model_calls=0`.

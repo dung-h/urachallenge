@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from typing import Any
 
+from app.guardrails import guardrail_prompt_text
+from app.logic.agent_runtime import run_logic_agent
 from app.logic.policy_reasoner import solve_policy
 from app.logic.premise_selector import Premise, hallucinated_premises, normalize_premises, select_premises
 from app.logic.proof_trace import ProofStep, build_proof_steps
@@ -23,6 +26,7 @@ class LogicSolution:
     model_calls: int = 0
     proof_steps: list[ProofStep] = field(default_factory=list)
     z3_sidecar: dict[str, object] | None = None
+    agent_trace: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _z3_metadata(z3_result: object) -> dict[str, object]:
@@ -121,6 +125,8 @@ def _norm(text: str) -> str:
 def _singular(word: str) -> str:
     if word.endswith("ies") and len(word) > 4:
         return word[:-3] + "y"
+    if word.endswith(("xes", "zes", "ches", "shes")) and len(word) > 4:
+        return word[:-2]
     return word[:-1] if word.endswith("s") and len(word) > 3 else word
 
 
@@ -243,6 +249,36 @@ def _question_subject_predicate(question: str) -> tuple[str | None, str | None, 
         if match:
             return match.group(1).strip(), match.group(2).strip(), negative
     return None, None, negative
+
+
+def _question_polarity(question: str) -> str | None:
+    """Return the polarity the question is asking about, if explicit.
+
+    We only use this for narrow polarity questions like "known/unknown",
+    because those cases need yes/no mapping instead of a generic unknown.
+    """
+
+    _subject, predicate, negative = _question_subject_predicate(question)
+    if not predicate:
+        return None
+    pred = _norm(predicate)
+    if "unknown" in pred or "undetermined" in pred:
+        return "unknown"
+    if "known" in pred or "know" == pred:
+        return "known" if not negative else "unknown"
+    return None
+
+
+def _question_existential(question: str) -> tuple[str, str | None] | None:
+    q = _norm(question).rstrip("?")
+    match = re.match(r"^(?:are|is|were|was)\s+there\s+any\s+(.+?)(?:\s+(?:that|who|which)\s+(.+))?$", q)
+    if not match:
+        match = re.match(r"^(?:are|is|were|was)\s+any\s+(.+?)(?:\s+(?:that|who|which)\s+(.+))?$", q)
+    if not match:
+        return None
+    entity = _strip_articles(match.group(1).strip())
+    predicate = match.group(2).strip() if match.group(2) else None
+    return entity, predicate
 
 
 def _match_all_rule(premise: str) -> tuple[str, str] | None:
@@ -599,6 +635,7 @@ def _fact_subject_kind(premise: str) -> tuple[str, str] | None:
         "temperature is high",
         "reacts",
         "code is correct",
+        "fails",
     ]:
         if low == standalone:
             return "", standalone
@@ -694,8 +731,61 @@ def _has_universal_no_conflict(
     return None
 
 
+def _universal_positive_support(
+    subject: str | None,
+    predicate: str | None,
+    all_rules: list[tuple[Premise, tuple[str, str]]],
+    facts: list[tuple[Premise, tuple[str, str]]],
+    *,
+    has_rules: bool = False,
+) -> tuple[str, list[Premise], str] | None:
+    if not subject or not predicate:
+        return None
+    queue: list[tuple[str, list[Premise]]] = []
+    seen: set[str] = set()
+    for fact_premise, (fact_subject, fact_kind) in facts:
+        if _is_negated(fact_premise.text) or fact_kind.startswith(("not ", "no ")):
+            continue
+        if _contains_entity(fact_subject, subject):
+            queue.append((fact_kind, [fact_premise]))
+    while queue:
+        kind, support = queue.pop(0)
+        if kind in seen:
+            continue
+        seen.add(kind)
+        if _predicate_matches(predicate, kind) or predicate in kind or kind in predicate:
+            if len(support) == 1 and has_rules:
+                continue
+            return "yes", list(dict.fromkeys(support)), "universal syllogism chain"
+        for rule_premise, (left, mid) in all_rules:
+            if _class_matches(left, kind):
+                new_support = list(dict.fromkeys(support + [rule_premise]))
+                if mid not in seen:
+                    queue.append((mid, new_support))
+    return None
+
+
+def _universal_negative_support(
+    subject: str | None,
+    predicate: str | None,
+    no_rules: list[tuple[Premise, tuple[str, str]]],
+    facts: list[tuple[Premise, tuple[str, str]]],
+) -> tuple[str, list[Premise], str] | None:
+    if not subject or not predicate:
+        return None
+    for fact_premise, (fact_subject, fact_kind) in facts:
+        if not _contains_entity(fact_subject, subject):
+            continue
+        for no_premise, (left, right) in no_rules:
+            if _class_matches(left, fact_kind) and _predicate_matches(predicate, right):
+                return "no", [no_premise, fact_premise], "universal no-overlap entailment"
+    return None
+
+
 def _solve_rules(question: str, premises: list[Premise]) -> tuple[str, list[Premise], str]:
     subject, predicate, _negative = _question_subject_predicate(question)
+    question_polarity = _question_polarity(question)
+    existential_query = _question_existential(question)
     selected = select_premises(question, premises)
     all_rules = [(p, rule) for p in premises if (rule := _match_all_rule(p.text))]
     no_rules = [(p, rule) for p in premises if (rule := _match_no_rule(p.text))]
@@ -729,6 +819,14 @@ def _solve_rules(question: str, premises: list[Premise]) -> tuple[str, list[Prem
     if object_property_chain:
         return object_property_chain
 
+    universal_negative = _universal_negative_support(subject, predicate, no_rules, facts)
+    if universal_negative:
+        return universal_negative
+
+    universal_positive = _universal_positive_support(subject, predicate, all_rules, facts, has_rules=bool(all_rules or no_rules or if_rules))
+    if universal_positive:
+        return universal_positive
+
     conditional_status_unknown = _solve_conditional_status_unknown(question, premises)
     if conditional_status_unknown:
         return conditional_status_unknown
@@ -736,6 +834,51 @@ def _solve_rules(question: str, premises: list[Premise]) -> tuple[str, list[Prem
     modus_tollens = _solve_modus_tollens_negative_consequent(question, premises)
     if modus_tollens:
         return modus_tollens
+
+    if existential_query:
+        entity, existential_predicate = existential_query
+        witness: list[Premise] = []
+        negative_evidence: list[Premise] = []
+        for premise in premises:
+            low = _norm(premise.text)
+            if low.startswith("some "):
+                if _contains_entity(low, entity) and (not existential_predicate or _predicate_supported(existential_predicate, low)):
+                    witness = [premise]
+                    break
+            fact = _fact_subject_kind(premise.text)
+            if fact and _contains_entity(fact[0], entity):
+                if not _is_negated(low) and (not existential_predicate or _predicate_supported(existential_predicate, fact[1])):
+                    witness = [premise]
+                    break
+                if existential_predicate and _is_negated(low) and _predicate_supported(existential_predicate, existential_predicate):
+                    negative_evidence.append(premise)
+            no_rule = _match_no_rule(premise.text)
+            if no_rule and _class_matches(no_rule[0], entity) and (not existential_predicate or _predicate_matches(existential_predicate, no_rule[1])):
+                negative_evidence.append(premise)
+        if witness:
+            return "yes", witness, "existential witness provided"
+        if negative_evidence:
+            return "no", list(dict.fromkeys(negative_evidence)), "existential premise blocked by a universal negative rule"
+        return "unknown", selected, "existential query lacks a concrete witness"
+
+    if question_polarity in {"known", "unknown"}:
+        for rule_premise, (antecedent, consequent) in if_rules:
+            for fact_premise, (_fact_subject, fact_kind) in facts:
+                if _negates_condition(fact_premise.text, antecedent):
+                    continue
+                if not _antecedent_triggered(antecedent, fact_kind, fact_premise.text):
+                    continue
+                consequent_low = _norm(consequent)
+                if question_polarity == "known":
+                    if "unknown" in consequent_low:
+                        return "no", [rule_premise, fact_premise], "conditional rule implies the result is unknown"
+                    if "known" in consequent_low or _predicate_matches("known", consequent_low):
+                        return "yes", [rule_premise, fact_premise], "conditional rule implies the result is known"
+                else:
+                    if "unknown" in consequent_low or _predicate_matches("unknown", consequent_low):
+                        return "yes", [rule_premise, fact_premise], "conditional rule implies the result is unknown"
+                    if "known" in consequent_low or _predicate_matches("known", consequent_low):
+                        return "no", [rule_premise, fact_premise], "conditional rule implies the result is known"
 
     conditional_must_true = _solve_conditional_must_true_mcq(question, premises)
     if conditional_must_true:
@@ -834,7 +977,10 @@ def solve(
     z3_sidecar_mode: str = "experiment_only",
     enable_mcq_symbolic: bool = False,
     choices: list[str] | None = None,
+    max_agent_steps: int = 4,
+    max_model_calls: int = 5,
 ) -> LogicSolution:
+    question = guardrail_prompt_text(question).normalized_text
     normalized = normalize_premises(premises)
     
     # MCQ symbolic path: experiment-only, disabled by default.
@@ -907,29 +1053,7 @@ def solve(
         confidence = 0.55
     elif answer == "unknown" and any(token in rule for token in ["negated antecedent", "conditional premise", "directly contradictory", "does not identify", "premises support both"]):
         confidence = 0.72
-    if use_llm and llm_client and (confidence < 0.7 or answer == "unknown"):
-        suggestion = getattr(llm_client, "suggest_logic", lambda *_: None)(question, [f"{p.id}: {p.text}" for p in normalized])
-        if isinstance(suggestion, dict):
-            candidate = normalize_answer_label(suggestion.get("answer"))
-            ids_raw = suggestion.get("used_premise_ids") or suggestion.get("premises") or []
-            ids = {str(pid).upper() for pid in ids_raw if re.fullmatch(r"P\d+", str(pid).upper())}
-            hallucinated_candidate = hallucinated_premises(ids, normalized)
-            if (candidate in {"yes", "no", "unknown"} or re.fullmatch(r"[A-E]", candidate)) and ids and not hallucinated_candidate:
-                selected = [p for p in normalized if p.id in ids]
-                solution = LogicSolution(
-                    answer=candidate,
-                    explanation=logic_explanation(candidate, selected, str(suggestion.get("reason_short") or "validated LLM fallback")),
-                    premises=[p.id for p in selected],
-                    cot=["Rule baseline confidence below threshold", "LLM reasoner suggested answer", "Backend validated premise IDs and normalized answer"],
-                    confidence=0.68 if candidate == "unknown" else 0.72,
-                    hallucinated_premises=[],
-                    llm_fallback_used=True,
-                    model_calls=1,
-                    proof_steps=build_proof_steps(candidate, selected, "validated LLM fallback", 0.68 if candidate == "unknown" else 0.72),
-                )
-                if enable_z3_sidecar:
-                    return _with_z3_sidecar(solution, question, normalized, z3_allowed_domains, z3_sidecar_mode)
-                return solution
+    model_calls = 0
     solution = LogicSolution(
         answer=answer,
         explanation=logic_explanation(answer, selected, rule),
@@ -938,8 +1062,59 @@ def solve(
         confidence=confidence,
         hallucinated_premises=hallucinated,
         llm_fallback_used=False,
+        model_calls=model_calls,
         proof_steps=build_proof_steps(answer, selected, rule, confidence),
+        agent_trace=[],
     )
+    if use_llm and llm_client and (confidence < 0.7 or answer == "unknown"):
+        agent_outcome = run_logic_agent(
+            question,
+            normalized,
+            llm_client=llm_client,
+            base_solution=solution,
+            choices=list(choices or []),
+            allow_llm_rescue=True,
+            max_steps=max_agent_steps,
+            max_model_calls=max_model_calls,
+        )
+        model_calls += agent_outcome.model_calls
+        if agent_outcome.success:
+            selected = [p for p in normalized if p.id in set(agent_outcome.premises)]
+            candidate = normalize_answer_label(agent_outcome.answer)
+            solution = LogicSolution(
+                answer=candidate,
+                explanation=agent_outcome.explanation,
+                premises=[p.id for p in selected],
+                cot=list(agent_outcome.cot) or [
+                    "Rule baseline confidence below threshold",
+                    "Agent planner selected a validated rescue proposal",
+                    "Backend validated premise IDs and normalized answer",
+                ],
+                confidence=agent_outcome.confidence,
+                hallucinated_premises=[],
+                llm_fallback_used=True,
+                model_calls=model_calls,
+                proof_steps=build_proof_steps(candidate, selected, "validated LLM fallback", agent_outcome.confidence),
+                agent_trace=list(agent_outcome.agent_trace),
+            )
+            if enable_z3_sidecar:
+                return _with_z3_sidecar(solution, question, normalized, z3_allowed_domains, z3_sidecar_mode)
+            return solution
+        solution = LogicSolution(
+            answer=answer,
+            explanation=agent_outcome.explanation if (agent_outcome.success and agent_outcome.explanation) else logic_explanation(answer, selected, rule),
+            premises=[p.id for p in selected],
+            cot=list(agent_outcome.cot) if agent_outcome.success else [f"Normalized {len(normalized)} premises", f"Selected premises: {', '.join(p.id for p in selected)}", f"Rule: {rule}"],
+            confidence=confidence,
+            hallucinated_premises=hallucinated,
+            llm_fallback_used=True,
+            model_calls=model_calls,
+            proof_steps=build_proof_steps(answer, selected, rule, confidence),
+            agent_trace=list(agent_outcome.agent_trace),
+        )
+        if enable_z3_sidecar:
+            return _with_z3_sidecar(solution, question, normalized, z3_allowed_domains, z3_sidecar_mode)
+        return solution
     if enable_z3_sidecar:
         return _with_z3_sidecar(solution, question, normalized, z3_allowed_domains, z3_sidecar_mode)
     return solution

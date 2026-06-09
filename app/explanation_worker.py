@@ -119,16 +119,17 @@ def build_explanation_trace(
     formula_expression = None
     formula_target_unit = None
     if task_type == "physics" and fol:
-        try:
-            formula = get_formula(fol)
-        except KeyError:
-            formula = None
-            special_hint = SPECIAL_FORMULA_HINTS.get(fol)
-            if special_hint:
-                formula_expression, formula_target_unit = special_hint
-        if formula is not None:
-            formula_expression = formula.expression
-            formula_target_unit = formula.target_unit
+        special_hint = SPECIAL_FORMULA_HINTS.get(fol)
+        if special_hint:
+            formula_expression, formula_target_unit = special_hint
+        else:
+            try:
+                formula = get_formula(fol)
+            except KeyError:
+                formula = None
+            if formula is not None:
+                formula_expression = formula.expression
+                formula_target_unit = formula.target_unit
 
     normalized_proof_steps: list[dict[str, Any]] = []
     for step in proof_steps or []:
@@ -166,10 +167,59 @@ def validate_explanation_rewrite(explanation: str, trace: ExplanationTrace | dic
         return False, ["empty_explanation"]
 
     normalized = _norm(rewritten)
+    solver_explanation = _norm(payload.get("solver_explanation") or "")
     answer = str(payload.get("answer") or "").strip()
     answer_hints = _answer_hints(answer)
     if answer_hints and not any(hint in normalized for hint in answer_hints):
         errors.append("missing_answer_reference")
+
+    # 1. Prompt Echoing detection
+    prompt_patterns = [
+        "you are an explanation worker",
+        "rewrite the backend trace",
+        "without changing the final answer",
+        "return json with a single key",
+        "explanation_rewrite",
+        "do not add new facts",
+        "explanation_trace",
+        "solver_explanation",
+        "trace_version",
+        "public_cot",
+        "solver_used",
+        "selected_premise_ids",
+    ]
+    for pattern in prompt_patterns:
+        if pattern in normalized:
+            errors.append("prompt_echo_detected:" + pattern.replace(" ", "_"))
+            break
+
+    # 2. JSON Structures / Trash detection
+    if rewritten.startswith("{") or "explanation\"" in normalized or re.search(r"explanation\s*:", normalized):
+        errors.append("raw_json_leakage")
+
+    # 3. Off-topic / Content Discrepancy detection
+    question = str(payload.get("question") or "").strip()
+    if question:
+        stop_words = {
+            "what", "find", "determine", "calculate", "with", "from", "that", "this", "then", "have",
+            "does", "some", "each", "were", "been", "only", "must", "show", "give", "here", "about",
+            "them", "their", "when", "where", "which", "your", "more", "less", "much", "many", "such"
+        }
+        q_words = re.findall(r"\b[A-Za-z]{4,}\b", question.lower())
+        important_keywords = {w for w in q_words if w not in stop_words}
+        if important_keywords:
+            overlap = False
+            rewritten_words = set(re.findall(r"\b[A-Za-z]{3,}\b", normalized))
+            for w1 in important_keywords:
+                for w2 in rewritten_words:
+                    # Match if one is a prefix of another, or they share a 4-character prefix (stem matching)
+                    if w1.startswith(w2) or w2.startswith(w1) or w1[:4] == w2[:4]:
+                        overlap = True
+                        break
+                if overlap:
+                    break
+            if not overlap:
+                errors.append("off_topic_explanation_no_keyword_overlap")
 
     task_type = str(payload.get("task_type") or "").strip()
     if task_type == "physics":
@@ -179,16 +229,23 @@ def validate_explanation_rewrite(explanation: str, trace: ExplanationTrace | dic
         )
         if formula_hints and not any(hint in normalized for hint in formula_hints):
             errors.append("missing_formula_reference")
+        fol = _norm(payload.get("fol") or "")
+        if "perpendicular_bisector" in fol and "perpendicular" not in normalized:
+            errors.append("missing_geometry_reference:perpendicular")
     elif task_type == "logic":
         selected_ids = [str(pid).strip().upper() for pid in payload.get("selected_premise_ids") or [] if str(pid).strip()]
+        present_ids = {match.upper() for match in re.findall(r"\bP\d+\b", rewritten, re.I)}
         if selected_ids:
-            present_ids = {match.upper() for match in re.findall(r"\bP\d+\b", rewritten, re.I)}
             missing_ids = [pid for pid in selected_ids if pid not in present_ids]
             if missing_ids:
                 errors.append("missing_premise_ids:" + ",".join(missing_ids))
-            foreign_ids = sorted(present_ids - set(selected_ids))
-            if foreign_ids:
-                errors.append("foreign_premise_ids:" + ",".join(foreign_ids))
+        foreign_ids = sorted(present_ids - set(selected_ids))
+        if foreign_ids:
+            errors.append("foreign_premise_ids:" + ",".join(foreign_ids))
+        proof_notes = " ".join(_norm(step.get("notes") or "") for step in payload.get("proof_steps") or [] if isinstance(step, dict))
+        for protected_phrase in ("missing faculty nomination condition", "existential witness"):
+            if (protected_phrase in proof_notes or protected_phrase in solver_explanation) and protected_phrase not in normalized:
+                errors.append("missing_solver_trace_phrase:" + protected_phrase)
 
     if answer.lower() == "yes" and re.search(r"\bno\b", normalized) and "yes" not in normalized:
         errors.append("answer_contradiction:no")

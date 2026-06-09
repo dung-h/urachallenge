@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -12,13 +13,12 @@ PIPELINE_CONFIG = ROOT / "configs" / "pipeline.yaml"
 
 @dataclass(frozen=True)
 class PipelineConfig:
-    enable_llm_fallback: bool = False
-    enable_llm_explanation: bool = False
     enable_mcq_symbolic: bool = False
+    enable_physics_web_search: bool = True
     # Hybrid solver requires an external local LLM endpoint and Z3.
     # Keep off by default so a fresh install can run the API/UI without extra deps.
     enable_hybrid_solver: bool = False
-    hybrid_api_url: str = "http://localhost:11434/v1/chat/completions"
+    hybrid_api_url: str = "http://127.0.0.1:8001/v1/chat/completions"
     hybrid_model: str = "gemma3:4b"
     fallback_confidence_threshold: float = 0.7
     deterministic_physics_authority: bool = True
@@ -30,6 +30,9 @@ class PipelineConfig:
     enable_z3_sidecar: bool = False
     z3_sidecar_mode: str = "experiment_only"
     z3_allowed_domains: tuple[str, ...] = ("academic_policy", "public_logic_sample")
+    max_model_calls: int = 5
+    max_agent_steps: int = 4
+    max_search_calls: int = 3
 
 
 def load_pipeline_config(path: Path = PIPELINE_CONFIG) -> PipelineConfig:
@@ -38,11 +41,10 @@ def load_pipeline_config(path: Path = PIPELINE_CONFIG) -> PipelineConfig:
     data = yaml.safe_load(path.read_text()) or {}
     values = data.get("pipeline", {}) or {}
     return PipelineConfig(
-        enable_llm_fallback=bool(values.get("enable_llm_fallback", False)),
-        enable_llm_explanation=bool(values.get("enable_llm_explanation", False)),
         enable_mcq_symbolic=bool(values.get("enable_mcq_symbolic", False)),
+        enable_physics_web_search=bool(values.get("enable_physics_web_search", True)),
         enable_hybrid_solver=bool(values.get("enable_hybrid_solver", False)),
-        hybrid_api_url=str(values.get("hybrid_api_url", "http://localhost:11434/v1/chat/completions")),
+        hybrid_api_url=str(values.get("hybrid_api_url", "http://127.0.0.1:8001/v1/chat/completions")),
         hybrid_model=str(values.get("hybrid_model", "gemma3:4b")),
         fallback_confidence_threshold=float(values.get("fallback_confidence_threshold", 0.7)),
         deterministic_physics_authority=bool(values.get("deterministic_physics_authority", True)),
@@ -54,4 +56,7 @@ def load_pipeline_config(path: Path = PIPELINE_CONFIG) -> PipelineConfig:
         enable_z3_sidecar=bool(values.get("enable_z3_sidecar", False)),
         z3_sidecar_mode=str(values.get("z3_sidecar_mode", "experiment_only")),
         z3_allowed_domains=tuple(values.get("z3_allowed_domains", ["academic_policy", "public_logic_sample"])),
+        max_model_calls=int(os.environ.get("URA_MAX_MODEL_CALLS") or values.get("max_model_calls", 5)),
+        max_agent_steps=int(os.environ.get("URA_MAX_AGENT_STEPS") or values.get("max_agent_steps", 4)),
+        max_search_calls=int(os.environ.get("URA_MAX_SEARCH_CALLS") or values.get("max_search_calls", 3)),
     )
